@@ -1,0 +1,32 @@
+{
+  "name": "@synappsis/email-provider",
+  "version": "0.1.0",
+  "description": "Provider-agnostic email library for Synappsis services. Wraps Google Workspace (Gmail) and Microsoft 365 (Graph) behind a single EmailProvider interface. Pure mechanics — no transport, no auth policies, no base64.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^2.16.0",
+    "googleapis": "^148.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SynappsisAI/email-provider.git"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

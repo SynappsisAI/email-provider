@@ -1,0 +1,385 @@
+import { google, type gmail_v1 } from "googleapis";
+import { buildMime } from "../mime.js";
+import type {
+  EmailProvider,
+  EmailAddress,
+  MessageSummary,
+  MessageFull,
+  AttachmentInfo,
+  Folder,
+  ListResult,
+  RetrievedAttachment,
+  SendParams,
+  ListParams,
+  SearchParams,
+  ReplyParams,
+  ForwardParams,
+  GoogleProviderConfig,
+} from "../types.js";
+
+export class GoogleEmailProvider implements EmailProvider {
+  readonly name = "google";
+  private credentials: Record<string, unknown>;
+  private gmailClients = new Map<string, gmail_v1.Gmail>();
+
+  constructor(config: GoogleProviderConfig) {
+    this.credentials = config.serviceAccountKey;
+  }
+
+  /** Get or create a Gmail client for the given delegated user (cached). */
+  private getGmail(mailbox: string): gmail_v1.Gmail {
+    let client = this.gmailClients.get(mailbox);
+    if (client) return client;
+
+    const auth = new google.auth.GoogleAuth({
+      credentials: this.credentials,
+      clientOptions: { subject: mailbox },
+      scopes: [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send",
+      ],
+    });
+
+    client = google.gmail({ version: "v1", auth });
+    this.gmailClients.set(mailbox, client);
+    return client;
+  }
+
+  // ── Parsing helpers ──
+
+  private static parseAddress(raw: string): EmailAddress {
+    const match = raw.match(/^(.+?)\s*<(.+?)>$/);
+    if (match) return { name: match[1].trim(), address: match[2].trim() };
+    return { address: raw.trim() };
+  }
+
+  private static parseAddressList(header: string | undefined): EmailAddress[] {
+    if (!header) return [];
+    return header.split(",").map(GoogleEmailProvider.parseAddress);
+  }
+
+  private static getHeader(headers: gmail_v1.Schema$MessagePartHeader[], name: string): string {
+    return headers?.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
+  }
+
+  private static decodeBody(part: gmail_v1.Schema$MessagePart | undefined): { html: string; text: string } {
+    if (!part) return { html: "", text: "" };
+
+    if (part.mimeType === "text/html" && part.body?.data) {
+      return { html: Buffer.from(part.body.data, "base64url").toString("utf-8"), text: "" };
+    }
+    if (part.mimeType === "text/plain" && part.body?.data) {
+      return { html: "", text: Buffer.from(part.body.data, "base64url").toString("utf-8") };
+    }
+
+    let html = "";
+    let text = "";
+    for (const sub of part.parts ?? []) {
+      const decoded = GoogleEmailProvider.decodeBody(sub);
+      if (decoded.html) html = decoded.html;
+      if (decoded.text) text = decoded.text;
+    }
+    return { html, text };
+  }
+
+  private static toSummary(m: gmail_v1.Schema$Message): MessageSummary {
+    const headers = m.payload?.headers ?? [];
+    return {
+      id: m.id!,
+      subject: GoogleEmailProvider.getHeader(headers, "Subject"),
+      from: GoogleEmailProvider.parseAddress(GoogleEmailProvider.getHeader(headers, "From")),
+      to: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "To")),
+      receivedAt: new Date(Number(m.internalDate)).toISOString(),
+      isRead: !m.labelIds?.includes("UNREAD"),
+      preview: m.snippet ?? "",
+      hasAttachments: m.payload?.parts?.some((p) => p.filename && p.filename.length > 0) ?? false,
+    };
+  }
+
+  private static extractAttachments(part: gmail_v1.Schema$MessagePart | undefined): AttachmentInfo[] {
+    if (!part) return [];
+    const results: AttachmentInfo[] = [];
+    if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
+      results.push({
+        id: part.body.attachmentId,
+        filename: part.filename,
+        contentType: part.mimeType ?? "application/octet-stream",
+        size: part.body.size ?? 0,
+      });
+    }
+    for (const sub of part.parts ?? []) {
+      results.push(...GoogleEmailProvider.extractAttachments(sub));
+    }
+    return results;
+  }
+
+  private static toFull(m: gmail_v1.Schema$Message): MessageFull {
+    const headers = m.payload?.headers ?? [];
+    const { html, text } = GoogleEmailProvider.decodeBody(m.payload ?? undefined);
+    const attachments = GoogleEmailProvider.extractAttachments(m.payload ?? undefined);
+    return {
+      id: m.id!,
+      subject: GoogleEmailProvider.getHeader(headers, "Subject"),
+      from: GoogleEmailProvider.parseAddress(GoogleEmailProvider.getHeader(headers, "From")),
+      to: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "To")),
+      cc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Cc")),
+      bcc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Bcc")),
+      receivedAt: new Date(Number(m.internalDate)).toISOString(),
+      isRead: !m.labelIds?.includes("UNREAD"),
+      bodyHtml: html,
+      bodyText: text,
+      hasAttachments: attachments.length > 0,
+      attachments,
+    };
+  }
+
+  // ── Gmail label ↔ "folder" mapping ──
+
+  private static readonly LABEL_TO_FOLDER: Record<string, string> = {
+    inbox: "INBOX",
+    sent: "SENT",
+    drafts: "DRAFT",
+    trash: "TRASH",
+    spam: "SPAM",
+    starred: "STARRED",
+    important: "IMPORTANT",
+  };
+
+  private static toLabelId(folder: string): string {
+    return GoogleEmailProvider.LABEL_TO_FOLDER[folder.toLowerCase()] ?? folder;
+  }
+
+  // ── EmailProvider implementation ──
+
+  async sendEmail({ mailbox, to, subject, body, cc, bcc, attachments }: SendParams) {
+    const gmail = this.getGmail(mailbox);
+    const raw = buildMime({ from: mailbox, to, cc, bcc, subject, html: body, attachments });
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+
+    return { from: mailbox };
+  }
+
+  async listMessages({ mailbox, folder, limit, offset, unreadOnly }: ListParams): Promise<ListResult> {
+    const gmail = this.getGmail(mailbox);
+    const maxResults = Math.min(limit ?? 25, 100);
+    const labelIds = [GoogleEmailProvider.toLabelId(folder ?? "inbox")];
+
+    const qParts: string[] = [];
+    if (unreadOnly) qParts.push("is:unread");
+
+    const list = await gmail.users.messages.list({
+      userId: "me",
+      labelIds,
+      q: qParts.length ? qParts.join(" ") : undefined,
+      maxResults: maxResults + (offset ?? 0),
+    });
+
+    const allIds = list.data.messages ?? [];
+    const sliced = allIds.slice(offset ?? 0, (offset ?? 0) + maxResults);
+
+    const messages = await Promise.all(
+      sliced.map(async ({ id }) => {
+        const msg = await gmail.users.messages.get({
+          userId: "me",
+          id: id!,
+          format: "metadata",
+          metadataHeaders: ["From", "To", "Subject"],
+        });
+        return GoogleEmailProvider.toSummary(msg.data);
+      })
+    );
+
+    return {
+      messages,
+      totalCount: list.data.resultSizeEstimate ?? messages.length,
+    };
+  }
+
+  async readMessage(mailbox: string, messageId: string): Promise<MessageFull> {
+    const gmail = this.getGmail(mailbox);
+    const msg = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
+    return GoogleEmailProvider.toFull(msg.data);
+  }
+
+  async searchMessages({ mailbox, query, folder, limit, offset }: SearchParams): Promise<ListResult> {
+    const gmail = this.getGmail(mailbox);
+    const maxResults = Math.min(limit ?? 25, 100);
+    const labelIds = folder ? [GoogleEmailProvider.toLabelId(folder)] : undefined;
+
+    const list = await gmail.users.messages.list({
+      userId: "me",
+      q: query,
+      labelIds,
+      maxResults: maxResults + (offset ?? 0),
+    });
+
+    const allIds = list.data.messages ?? [];
+    const sliced = allIds.slice(offset ?? 0, (offset ?? 0) + maxResults);
+
+    const messages = await Promise.all(
+      sliced.map(async ({ id }) => {
+        const msg = await gmail.users.messages.get({
+          userId: "me",
+          id: id!,
+          format: "metadata",
+          metadataHeaders: ["From", "To", "Subject"],
+        });
+        return GoogleEmailProvider.toSummary(msg.data);
+      })
+    );
+
+    return {
+      messages,
+      totalCount: list.data.resultSizeEstimate ?? messages.length,
+    };
+  }
+
+  async replyToMessage({ mailbox, messageId, body, replyAll }: ReplyParams) {
+    const gmail = this.getGmail(mailbox);
+
+    const original = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "metadata",
+      metadataHeaders: ["From", "To", "Cc", "Subject", "Message-ID", "References"],
+    });
+
+    const headers = original.data.payload?.headers ?? [];
+    const origFrom = GoogleEmailProvider.getHeader(headers, "From");
+    const origTo = GoogleEmailProvider.getHeader(headers, "To");
+    const origCc = GoogleEmailProvider.getHeader(headers, "Cc");
+    const origSubject = GoogleEmailProvider.getHeader(headers, "Subject");
+    const origMessageId = GoogleEmailProvider.getHeader(headers, "Message-ID");
+    const origReferences = GoogleEmailProvider.getHeader(headers, "References");
+
+    const replyTo = replyAll
+      ? [
+          ...GoogleEmailProvider.parseAddressList(origFrom).map((a) => a.address),
+          ...GoogleEmailProvider.parseAddressList(origTo).map((a) => a.address),
+        ].filter((a) => a.toLowerCase() !== mailbox.toLowerCase())
+      : GoogleEmailProvider.parseAddressList(origFrom).map((a) => a.address);
+
+    const cc = replyAll
+      ? GoogleEmailProvider.parseAddressList(origCc)
+          .map((a) => a.address)
+          .filter((a) => a.toLowerCase() !== mailbox.toLowerCase())
+      : undefined;
+
+    const subject = origSubject.startsWith("Re:") ? origSubject : `Re: ${origSubject}`;
+
+    const raw = buildMime({
+      from: mailbox,
+      to: replyTo,
+      cc,
+      subject,
+      html: body,
+      inReplyTo: origMessageId,
+      references: origReferences ? `${origReferences} ${origMessageId}` : origMessageId,
+    });
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw, threadId: original.data.threadId ?? undefined },
+    });
+  }
+
+  async forwardMessage({ mailbox, messageId, to, comment }: ForwardParams) {
+    const gmail = this.getGmail(mailbox);
+
+    const fullMsg = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
+
+    const headers = fullMsg.data.payload?.headers ?? [];
+    const origSubject = GoogleEmailProvider.getHeader(headers, "Subject");
+    const { html, text } = GoogleEmailProvider.decodeBody(fullMsg.data.payload ?? undefined);
+    const originalContent = html || `<pre>${text}</pre>`;
+
+    const forwardBody = comment
+      ? `${comment}<br><br>---------- Forwarded message ----------<br>${originalContent}`
+      : `---------- Forwarded message ----------<br>${originalContent}`;
+
+    const subject = origSubject.startsWith("Fwd:") ? origSubject : `Fwd: ${origSubject}`;
+
+    const raw = buildMime({ from: mailbox, to, subject, html: forwardBody });
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+  }
+
+  async markAsRead(mailbox: string, messageId: string, isRead: boolean) {
+    const gmail = this.getGmail(mailbox);
+    if (isRead) {
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: messageId,
+        requestBody: { removeLabelIds: ["UNREAD"] },
+      });
+    } else {
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: messageId,
+        requestBody: { addLabelIds: ["UNREAD"] },
+      });
+    }
+  }
+
+  async getAttachment(
+    mailbox: string,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<RetrievedAttachment> {
+    const gmail = this.getGmail(mailbox);
+    const res = await gmail.users.messages.attachments.get({
+      userId: "me",
+      messageId,
+      id: attachmentId,
+    });
+    // Gmail returns base64url-encoded data; decode straight to a Buffer.
+    const content = Buffer.from(res.data.data ?? "", "base64url");
+    return {
+      // Gmail's attachment endpoint doesn't return filename or contentType.
+      // Caller should fall back to the AttachmentInfo from the parent MessageFull.
+      filename: "",
+      contentType: "",
+      size: res.data.size ?? content.length,
+      content,
+    };
+  }
+
+  async listFolders(mailbox: string): Promise<Folder[]> {
+    const gmail = this.getGmail(mailbox);
+    const res = await gmail.users.labels.list({ userId: "me" });
+    const labels = res.data.labels ?? [];
+
+    const folders = await Promise.all(
+      labels.map(async (label) => {
+        const detail = await gmail.users.labels.get({
+          userId: "me",
+          id: label.id!,
+        });
+        return {
+          id: detail.data.id!,
+          name: detail.data.name!,
+          totalCount: detail.data.messagesTotal ?? 0,
+          unreadCount: detail.data.messagesUnread ?? 0,
+          childCount: 0,
+        };
+      })
+    );
+
+    return folders;
+  }
+}
