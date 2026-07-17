@@ -6,6 +6,8 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-17
+
 ### Changed
 
 - **Reemplazado el meta-paquete `googleapis` (~125MB) por el paquete scoped
