@@ -6,7 +6,18 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-04-12
+### Changed
+
+- **Reemplazado el meta-paquete `googleapis` (~125MB) por el paquete scoped
+  `@googleapis/gmail` (solo Gmail).** El provider de Google usaba únicamente la API
+  de Gmail pero arrastraba TODAS las APIs de Google. El cambio es mecánico y no toca
+  el contrato público `EmailProvider`: mismos tipos `gmail_v1`, misma factory
+  `gmail({version,auth})`, y `GoogleAuth` se toma del re-export `auth` del propio
+  `@googleapis/gmail` (sin dependencia directa extra, evita choque de versiones de
+  `google-auth-library`). Reduce el footprint instalado y, aguas abajo, la latencia
+  de cold start del worker Lambda de AgentFleet, donde esta librería es git-dependency.
+  Cierra #2. **Follow-up en AgentFleet:** bumpear el pin git de
+  `@synappsis/email-provider` para recoger el cambio.
 
 ### Added
 

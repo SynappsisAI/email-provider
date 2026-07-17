@@ -1,4 +1,4 @@
-import { google, type gmail_v1 } from "googleapis";
+import { gmail as gmailApi, auth, type gmail_v1 } from "@googleapis/gmail";
 import { buildMime } from "../mime.js";
 import type {
   EmailProvider,
@@ -31,7 +31,7 @@ export class GoogleEmailProvider implements EmailProvider {
     let client = this.gmailClients.get(mailbox);
     if (client) return client;
 
-    const auth = new google.auth.GoogleAuth({
+    const googleAuth = new auth.GoogleAuth({
       credentials: this.credentials,
       clientOptions: { subject: mailbox },
       scopes: [
@@ -40,7 +40,7 @@ export class GoogleEmailProvider implements EmailProvider {
       ],
     });
 
-    client = google.gmail({ version: "v1", auth });
+    client = gmailApi({ version: "v1", auth: googleAuth });
     this.gmailClients.set(mailbox, client);
     return client;
   }
