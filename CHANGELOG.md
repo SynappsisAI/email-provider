@@ -6,6 +6,18 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-22
+
+### Added
+
+- **Imágenes inline (CID) en `sendEmail`.** `Attachment` acepta un `contentId`
+  opcional: el archivo se incrusta en el cuerpo HTML (referenciado como
+  `<img src="cid:<contentId>">`) en vez de ir como adjunto descargable. Gmail lo
+  arma como `multipart/related` (dentro de `multipart/mixed` si además hay adjuntos
+  normales); Microsoft Graph usa `isInline` + `contentId`. Habilita firmas de correo
+  con logo (caso: firma corporativa del agente de Matelpa en AgentFleet).
+  Retrocompatible: sin `contentId` todo se comporta igual que antes.
+
 ## [0.2.0] — 2026-07-17
 
 ### Changed

@@ -124,6 +124,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
         name: att.filename,
         contentType: att.contentType,
         contentBytes: att.content.toString("base64"),
+        ...(att.contentId ? { isInline: true, contentId: att.contentId } : {}),
       }));
     }
 

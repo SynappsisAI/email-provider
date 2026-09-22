@@ -123,6 +123,26 @@ underlying provider needs internally:
 - **Microsoft**: base64-encodes the buffer for Graph API's `contentBytes`
   field on `#microsoft.graph.fileAttachment`
 
+### Inline images (CID)
+
+Set `contentId` on an attachment to embed it in the HTML body instead of
+attaching it — e.g. a logo in a signature. Reference it as `cid:<contentId>`:
+
+```ts
+await provider.sendEmail({
+  mailbox: "alfred@matelpa.com",
+  to: ["cliente@example.com"],
+  subject: "Hola",
+  body: '<p>Saludos,</p><img src="cid:logo" alt="Logo">',
+  attachments: [{ filename: "logo.png", contentType: "image/png", content: logoBytes, contentId: "logo" }],
+});
+```
+
+- **Google**: the HTML and its inline parts go in a `multipart/related` (with
+  `Content-ID` + `Content-Disposition: inline`), wrapped in `multipart/mixed`
+  when there are also regular attachments.
+- **Microsoft**: `isInline: true` + `contentId` on the `fileAttachment`.
+
 ## Provider setup
 
 ### Google Workspace

@@ -40,29 +40,62 @@ export function buildMime(opts: {
   }
   lines.push("MIME-Version: 1.0");
 
-  if (opts.attachments?.length) {
-    const boundary = `synappsis_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    lines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
-    lines.push("");
-    lines.push(`--${boundary}`);
+  // Structure: inline (cid) parts go in a multipart/related next to the HTML;
+  // regular attachments wrap that in a multipart/mixed.
+  //   mixed
+  //   ├── related (only if inline parts) ── html + inline images
+  //   └── attachments…
+  const inline = (opts.attachments ?? []).filter((a) => a.contentId);
+  const regular = (opts.attachments ?? []).filter((a) => !a.contentId);
+  const newBoundary = () => `synappsis_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  const pushHtml = () => {
     lines.push('Content-Type: text/html; charset="UTF-8"');
     lines.push("");
     lines.push(opts.html);
-    for (const att of opts.attachments) {
-      lines.push(`--${boundary}`);
-      lines.push(`Content-Type: ${att.contentType}`);
-      lines.push("Content-Transfer-Encoding: base64");
+  };
+  const pushPart = (att: Attachment) => {
+    lines.push(`Content-Type: ${att.contentType}`);
+    lines.push("Content-Transfer-Encoding: base64");
+    if (att.contentId) {
+      lines.push(`Content-ID: <${att.contentId}>`);
+      lines.push(`Content-Disposition: inline; filename="${att.filename}"`);
+    } else {
       lines.push(`Content-Disposition: attachment; filename="${att.filename}"`);
-      lines.push("");
-      // base64-encode the raw buffer for MIME wire format.
-      // Wrap at 76 chars per RFC 2045 to be safe with picky clients.
-      lines.push(att.content.toString("base64").replace(/(.{76})/g, "$1\r\n"));
     }
-    lines.push(`--${boundary}--`);
-  } else {
-    lines.push('Content-Type: text/html; charset="UTF-8"');
     lines.push("");
-    lines.push(opts.html);
+    // base64-encode the raw buffer for MIME wire format.
+    // Wrap at 76 chars per RFC 2045 to be safe with picky clients.
+    lines.push(att.content.toString("base64").replace(/(.{76})/g, "$1\r\n"));
+  };
+  // Body = the HTML, wrapped with its inline parts in multipart/related if any.
+  const pushBody = () => {
+    if (!inline.length) return pushHtml();
+    const related = newBoundary();
+    lines.push(`Content-Type: multipart/related; boundary="${related}"`);
+    lines.push("");
+    lines.push(`--${related}`);
+    pushHtml();
+    for (const att of inline) {
+      lines.push(`--${related}`);
+      pushPart(att);
+    }
+    lines.push(`--${related}--`);
+  };
+
+  if (regular.length) {
+    const mixed = newBoundary();
+    lines.push(`Content-Type: multipart/mixed; boundary="${mixed}"`);
+    lines.push("");
+    lines.push(`--${mixed}`);
+    pushBody();
+    for (const att of regular) {
+      lines.push(`--${mixed}`);
+      pushPart(att);
+    }
+    lines.push(`--${mixed}--`);
+  } else {
+    pushBody();
   }
 
   // Gmail API wants base64url (not standard base64) of the entire MIME bytes.

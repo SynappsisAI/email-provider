@@ -63,6 +63,12 @@ export interface Attachment {
   filename: string;
   content: Buffer;
   contentType: string;
+  /**
+   * Set to embed the file INLINE instead of attaching it: the HTML body
+   * references it as `<img src="cid:<contentId>">` (e.g. a logo in an email
+   * signature). Omit for a regular downloadable attachment. Bare id, no `<>`.
+   */
+  contentId?: string;
 }
 
 /**
