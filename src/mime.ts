@@ -72,7 +72,7 @@ export function buildMime(opts: {
   const pushBody = () => {
     if (!inline.length) return pushHtml();
     const related = newBoundary();
-    lines.push(`Content-Type: multipart/related; boundary="${related}"`);
+    lines.push(`Content-Type: multipart/related; type="text/html"; boundary="${related}"`);
     lines.push("");
     lines.push(`--${related}`);
     pushHtml();

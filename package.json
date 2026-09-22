@@ -1,6 +1,6 @@
 {
   "name": "@synappsis/email-provider",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Provider-agnostic email library for Synappsis services. Wraps Google Workspace (Gmail) and Microsoft 365 (Graph) behind a single EmailProvider interface. Pure mechanics — no transport, no auth policies, no base64.",
   "type": "module",
   "main": "src/index.ts",

@@ -6,6 +6,14 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-22
+
+### Fixed
+
+- **`multipart/related` ahora declara `type="text/html"`** (parámetro obligatorio según
+  RFC 2387). Sin él, un parser estricto o un gateway de seguridad podía mostrar la imagen
+  inline como adjunto suelto. Gmail/Outlook/Apple Mail ya lo toleraban.
+
 ## [0.3.0] — 2026-09-22
 
 ### Added
