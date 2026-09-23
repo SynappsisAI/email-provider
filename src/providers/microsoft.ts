@@ -1,5 +1,6 @@
 import { ConfidentialClientApplication } from "@azure/msal-node";
 import type {
+  Attachment,
   EmailProvider,
   EmailAddress,
   MessageSummary,
@@ -219,7 +220,11 @@ export class MicrosoftEmailProvider implements EmailProvider {
     };
   }
 
-  async replyToMessage({ mailbox, messageId, body, replyAll }: ReplyParams) {
+  async replyToMessage({ mailbox, messageId, body, replyAll, attachments }: ReplyParams) {
+    if (attachments?.length) {
+      await this.sendViaDraft(mailbox, messageId, replyAll ? "createReplyAll" : "createReply", body, attachments);
+      return;
+    }
     const action = replyAll ? "replyAll" : "reply";
     await this.graph(`/users/${mailbox}/messages/${messageId}/${action}`, {
       method: "POST",
@@ -227,7 +232,11 @@ export class MicrosoftEmailProvider implements EmailProvider {
     });
   }
 
-  async forwardMessage({ mailbox, messageId, to, comment }: ForwardParams) {
+  async forwardMessage({ mailbox, messageId, to, comment, attachments }: ForwardParams) {
+    if (attachments?.length) {
+      await this.sendViaDraft(mailbox, messageId, "createForward", comment ?? "", attachments, to);
+      return;
+    }
     await this.graph(`/users/${mailbox}/messages/${messageId}/forward`, {
       method: "POST",
       body: {
@@ -235,6 +244,56 @@ export class MicrosoftEmailProvider implements EmailProvider {
         toRecipients: to.map((a) => ({ emailAddress: { address: a } })),
       },
     });
+  }
+
+  /**
+   * Reply/forward carrying attachments. The one-shot `/reply` and `/forward` actions only
+   * take a `comment` string, so inline images can't ride on them. Instead: create the
+   * draft (Graph fills threading, quoted original and — on forward — the original's
+   * attachments), prepend our HTML to its body, add the attachments, send. A failure
+   * after the draft exists deletes it so no orphan draft is left behind.
+   */
+  private async sendViaDraft(
+    mailbox: string,
+    messageId: string,
+    action: "createReply" | "createReplyAll" | "createForward",
+    html: string,
+    attachments: Attachment[],
+    to?: string[],
+  ) {
+    const draft = await this.graph(`/users/${mailbox}/messages/${messageId}/${action}`, { method: "POST", body: {} });
+    const draftPath = `/users/${mailbox}/messages/${draft.id}`;
+    try {
+      // The draft's quoted body follows the mailbox's compose format — normalize a
+      // plain-text one to HTML so its line breaks survive under contentType HTML.
+      const raw: string = draft.body?.content ?? "";
+      const quoted = draft.body?.contentType?.toLowerCase() === "html"
+        ? raw
+        : raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r?\n/g, "<br>");
+      const bodyTag = quoted.match(/<body[^>]*>/i);
+      const content = bodyTag
+        ? quoted.replace(bodyTag[0], `${bodyTag[0]}${html}`)
+        : `${html}${quoted}`;
+      const patch: Record<string, unknown> = { body: { contentType: "HTML", content } };
+      if (to) patch.toRecipients = to.map((a) => ({ emailAddress: { address: a } }));
+      await this.graph(draftPath, { method: "PATCH", body: patch });
+      for (const att of attachments) {
+        await this.graph(`${draftPath}/attachments`, {
+          method: "POST",
+          body: {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            name: att.filename,
+            contentType: att.contentType,
+            contentBytes: att.content.toString("base64"),
+            ...(att.contentId ? { isInline: true, contentId: att.contentId } : {}),
+          },
+        });
+      }
+      await this.graph(`${draftPath}/send`, { method: "POST" });
+    } catch (err) {
+      await this.graph(draftPath, { method: "DELETE" }).catch(() => {});
+      throw err;
+    }
   }
 
   async markAsRead(mailbox: string, messageId: string, isRead: boolean) {

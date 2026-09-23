@@ -113,6 +113,25 @@ export class GoogleEmailProvider implements EmailProvider {
     return results;
   }
 
+  /** Attachment parts with what a re-send needs, incl. the Content-ID of inline ones. */
+  private static collectParts(
+    part: gmail_v1.Schema$MessagePart | undefined,
+  ): { attachmentId: string; filename: string; contentType: string; contentId?: string }[] {
+    if (!part) return [];
+    const results: { attachmentId: string; filename: string; contentType: string; contentId?: string }[] = [];
+    if (part.filename && part.body?.attachmentId) {
+      const cid = GoogleEmailProvider.getHeader(part.headers ?? [], "Content-ID").replace(/^<|>$/g, "");
+      results.push({
+        attachmentId: part.body.attachmentId,
+        filename: part.filename,
+        contentType: part.mimeType ?? "application/octet-stream",
+        ...(cid ? { contentId: cid } : {}),
+      });
+    }
+    for (const sub of part.parts ?? []) results.push(...GoogleEmailProvider.collectParts(sub));
+    return results;
+  }
+
   private static toFull(m: gmail_v1.Schema$Message): MessageFull {
     const headers = m.payload?.headers ?? [];
     const { html, text } = GoogleEmailProvider.decodeBody(m.payload ?? undefined);
@@ -242,7 +261,7 @@ export class GoogleEmailProvider implements EmailProvider {
     };
   }
 
-  async replyToMessage({ mailbox, messageId, body, replyAll }: ReplyParams) {
+  async replyToMessage({ mailbox, messageId, body, replyAll, attachments }: ReplyParams) {
     const gmail = this.getGmail(mailbox);
 
     const original = await gmail.users.messages.get({
@@ -283,6 +302,7 @@ export class GoogleEmailProvider implements EmailProvider {
       html: body,
       inReplyTo: origMessageId,
       references: origReferences ? `${origReferences} ${origMessageId}` : origMessageId,
+      attachments,
     });
 
     await gmail.users.messages.send({
@@ -291,7 +311,7 @@ export class GoogleEmailProvider implements EmailProvider {
     });
   }
 
-  async forwardMessage({ mailbox, messageId, to, comment }: ForwardParams) {
+  async forwardMessage({ mailbox, messageId, to, comment, attachments }: ForwardParams) {
     const gmail = this.getGmail(mailbox);
 
     const fullMsg = await gmail.users.messages.get({
@@ -311,7 +331,18 @@ export class GoogleEmailProvider implements EmailProvider {
 
     const subject = origSubject.startsWith("Fwd:") ? origSubject : `Fwd: ${origSubject}`;
 
-    const raw = buildMime({ from: mailbox, to, subject, html: forwardBody });
+    // Carry the original's attachments (previously dropped), keeping inline images inline
+    // so the forwarded body's own cid: references still resolve.
+    const original = await Promise.all(
+      GoogleEmailProvider.collectParts(fullMsg.data.payload ?? undefined).map(async (p) => ({
+        filename: p.filename,
+        contentType: p.contentType,
+        content: (await this.getAttachment(mailbox, messageId, p.attachmentId)).content,
+        ...(p.contentId ? { contentId: p.contentId } : {}),
+      })),
+    );
+    const all = [...original, ...(attachments ?? [])];
+    const raw = buildMime({ from: mailbox, to, subject, html: forwardBody, attachments: all.length ? all : undefined });
 
     await gmail.users.messages.send({
       userId: "me",

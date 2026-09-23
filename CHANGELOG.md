@@ -6,6 +6,24 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-22
+
+### Added
+
+- **`replyToMessage` y `forwardMessage` aceptan `attachments`** (típicamente imágenes
+  inline con `contentId`, p.ej. el logo de una firma). En Microsoft Graph, con adjuntos
+  se usa el flujo de borrador (`createReply`/`createReplyAll`/`createForward` → PATCH del
+  cuerpo con nuestro HTML arriba del citado → adjuntos → `send`; si algo falla, el borrador
+  se borra); sin adjuntos se mantiene el endpoint de un paso de siempre. En Gmail, los
+  adjuntos van al MIME del reply/forward. Retrocompatible.
+
+### Fixed
+
+- **El forward de Gmail perdía los adjuntos del correo original.** Ahora los lleva (las
+  imágenes inline del original siguen inline con su `Content-ID`).
+- **Nombres de adjunto con acentos o comillas rompían el header MIME.** Ahora se codifican
+  con RFC 2231 (`filename*=UTF-8''…`).
+
 ## [0.3.1] — 2026-09-22
 
 ### Fixed

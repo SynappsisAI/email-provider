@@ -143,6 +143,10 @@ await provider.sendEmail({
   when there are also regular attachments.
 - **Microsoft**: `isInline: true` + `contentId` on the `fileAttachment`.
 
+`replyToMessage` / `forwardMessage` also take `attachments` (e.g. a signed reply). On
+Microsoft this switches to Graph's draft flow (`createReply`/`createForward` → patch body →
+add attachments → send) since the one-shot `/reply` and `/forward` only take a `comment`.
+
 ## Provider setup
 
 ### Google Workspace

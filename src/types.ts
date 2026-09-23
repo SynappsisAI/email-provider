@@ -120,6 +120,9 @@ export interface ReplyParams {
   messageId: string;
   body: string;
   replyAll?: boolean;
+  /** Extra attachments for the reply — typically inline (`contentId`) images such
+   *  as a signature logo referenced from `body`. */
+  attachments?: Attachment[];
 }
 
 export interface ForwardParams {
@@ -127,6 +130,9 @@ export interface ForwardParams {
   messageId: string;
   to: string[];
   comment?: string;
+  /** Extra attachments added to the forward (on top of the original's, which are
+   *  always carried) — typically inline (`contentId`) images referenced from `comment`. */
+  attachments?: Attachment[];
 }
 
 // ── Provider configuration ──

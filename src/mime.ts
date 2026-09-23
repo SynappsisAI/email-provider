@@ -1,5 +1,13 @@
 import type { Attachment } from "./types.js";
 
+/** `filename` parameter: quoted ASCII, or RFC 2231 `filename*` for non-ASCII / quotes /
+ *  control chars, which would otherwise break the header. */
+function filenameParam(name: string): string {
+  if (/^[\x20-\x7E]*$/.test(name) && !/["\\]/.test(name)) return `filename="${name}"`;
+  const encoded = encodeURIComponent(name.replace(/[\r\n]/g, " ")).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `filename*=UTF-8''${encoded}`;
+}
+
 /**
  * Build a base64url-encoded RFC 2822/2045 MIME message ready for the
  * Gmail API's `users.messages.send`. Used by the Google provider only —
@@ -59,9 +67,9 @@ export function buildMime(opts: {
     lines.push("Content-Transfer-Encoding: base64");
     if (att.contentId) {
       lines.push(`Content-ID: <${att.contentId}>`);
-      lines.push(`Content-Disposition: inline; filename="${att.filename}"`);
+      lines.push(`Content-Disposition: inline; ${filenameParam(att.filename)}`);
     } else {
-      lines.push(`Content-Disposition: attachment; filename="${att.filename}"`);
+      lines.push(`Content-Disposition: attachment; ${filenameParam(att.filename)}`);
     }
     lines.push("");
     // base64-encode the raw buffer for MIME wire format.
