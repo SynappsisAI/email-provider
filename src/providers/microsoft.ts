@@ -247,6 +247,47 @@ export class MicrosoftEmailProvider implements EmailProvider {
     });
   }
 
+  /** Single-request attachment upload limit on the draft path (bigger needs an upload session). */
+  private static readonly SIMPLE_ATTACHMENT_MAX_BYTES = 3 * 1024 * 1024;
+
+  /**
+   * The original's inline images that a reply draft's quoted body references but that the
+   * draft doesn't already carry. BEST-EFFORT: a quoted image that can't be copied (too big
+   * for a simple upload, a transient error) must never block the reply itself.
+   */
+  private async originalInlineAttachments(mailbox: string, messageId: string, draftPath: string): Promise<Attachment[]> {
+    try {
+      // Metadata only (a full list would pull every attachment's bytes, PDFs included).
+      const base = `/users/${mailbox}/messages/${messageId}/attachments`;
+      const [list, onDraft] = await Promise.all([
+        this.graph(base, { params: { $select: "id,isInline,size" } }),
+        this.graph(`${draftPath}/attachments`, { params: { $select: "id,isInline" } }),
+      ]);
+      const inlineIds = ((list?.value ?? []) as any[])
+        .filter((a) => a.isInline && (a.size ?? 0) < MicrosoftEmailProvider.SIMPLE_ATTACHMENT_MAX_BYTES)
+        .map((a) => a.id as string);
+      if (!inlineIds.length) return [];
+      // If Graph already copied the inline images into the draft, don't add them twice.
+      const draftInlineIds = ((onDraft?.value ?? []) as any[]).filter((a) => a.isInline).map((a) => a.id as string);
+      const draftCids = new Set(
+        (await Promise.all(draftInlineIds.map((id) => this.graph(`${draftPath}/attachments/${id}`))))
+          .map((a: any) => String(a?.contentId ?? "").replace(/^<|>$/g, "")),
+      );
+      const full = await Promise.all(inlineIds.map((id) => this.graph(`${base}/${id}`)));
+      return full
+        .filter((a: any) => a?.contentId && a.contentBytes && a["@odata.type"] === "#microsoft.graph.fileAttachment")
+        .map((a: any) => ({
+          filename: a.name,
+          contentType: a.contentType,
+          content: Buffer.from(a.contentBytes, "base64"),
+          contentId: String(a.contentId).replace(/^<|>$/g, ""),
+        }))
+        .filter((a) => !draftCids.has(a.contentId));
+    } catch {
+      return [];
+    }
+  }
+
   /**
    * Reply/forward carrying attachments. The one-shot `/reply` and `/forward` actions only
    * take a `comment` string, so inline images can't ride on them. Instead: create the
@@ -254,23 +295,6 @@ export class MicrosoftEmailProvider implements EmailProvider {
    * attachments), prepend our HTML to its body, add the attachments, send. A failure
    * after the draft exists deletes it so no orphan draft is left behind.
    */
-  private async originalInlineAttachments(mailbox: string, messageId: string): Promise<Attachment[]> {
-    // List metadata only (a full list would pull every attachment's bytes, PDFs included),
-    // then fetch just the inline ones.
-    const base = `/users/${mailbox}/messages/${messageId}/attachments`;
-    const list = await this.graph(base, { params: { $select: "id,isInline" } });
-    const inlineIds = ((list?.value ?? []) as any[]).filter((a) => a.isInline).map((a) => a.id as string);
-    const full = await Promise.all(inlineIds.map((id) => this.graph(`${base}/${id}`)));
-    return full
-      .filter((a: any) => a?.contentId && a.contentBytes && a["@odata.type"] === "#microsoft.graph.fileAttachment")
-      .map((a: any) => ({
-        filename: a.name,
-        contentType: a.contentType,
-        content: Buffer.from(a.contentBytes, "base64"),
-        contentId: String(a.contentId).replace(/^<|>$/g, ""),
-      }));
-  }
-
   private async sendViaDraft(
     mailbox: string,
     messageId: string,
@@ -299,7 +323,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       // createReply(All) drafts quote the original's HTML (incl. its cid: images) but don't
       // carry its inline attachments — copy them so the quote doesn't render broken images.
       // (createForward already carries every original attachment.)
-      const carried = action === "createForward" ? [] : await this.originalInlineAttachments(mailbox, messageId);
+      const carried = action === "createForward" ? [] : await this.originalInlineAttachments(mailbox, messageId, draftPath);
       for (const att of [...carried, ...attachments]) {
         await this.graph(`${draftPath}/attachments`, {
           method: "POST",

@@ -114,7 +114,8 @@ export class GoogleEmailProvider implements EmailProvider {
     return results;
   }
 
-  private static readonly FORWARD_CARRY_MAX_BYTES = 20 * 1024 * 1024;
+  /** Gmail caps a message at 25MB; stay under it with the base64-encoded payload. */
+  private static readonly FORWARD_CARRY_MAX_BYTES = 24 * 1024 * 1024;
 
   /**
    * Attachment parts with what a re-send needs. A part stays INLINE (keeps its Content-ID)
@@ -354,7 +355,9 @@ export class GoogleEmailProvider implements EmailProvider {
     // ≤25MB of attachments, and the MIME is held in memory ~3x) fall back to the old
     // body-only forward rather than fail.
     const parts = GoogleEmailProvider.collectParts(fullMsg.data.payload ?? undefined, originalContent);
-    const carryOriginals = parts.reduce((n, p) => n + p.size, 0) <= GoogleEmailProvider.FORWARD_CARRY_MAX_BYTES;
+    // Budget the ENCODED size (base64 ≈ 4/3) of the originals plus the caller's own attachments.
+    const decoded = parts.reduce((n, p) => n + p.size, 0) + (attachments ?? []).reduce((n, a) => n + a.content.length, 0);
+    const carryOriginals = Math.ceil((decoded * 4) / 3) <= GoogleEmailProvider.FORWARD_CARRY_MAX_BYTES;
     const original: Attachment[] = [];
     if (carryOriginals) {
       for (const p of parts) {
