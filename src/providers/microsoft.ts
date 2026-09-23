@@ -288,6 +288,19 @@ export class MicrosoftEmailProvider implements EmailProvider {
     }
   }
 
+  private async addDraftAttachment(draftPath: string, att: Attachment) {
+    await this.graph(`${draftPath}/attachments`, {
+      method: "POST",
+      body: {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: att.filename,
+        contentType: att.contentType,
+        contentBytes: att.content.toString("base64"),
+        ...(att.contentId ? { isInline: true, contentId: att.contentId } : {}),
+      },
+    });
+  }
+
   /**
    * Reply/forward carrying attachments. The one-shot `/reply` and `/forward` actions only
    * take a `comment` string, so inline images can't ride on them. Instead: create the
@@ -324,18 +337,10 @@ export class MicrosoftEmailProvider implements EmailProvider {
       // carry its inline attachments — copy them so the quote doesn't render broken images.
       // (createForward already carries every original attachment.)
       const carried = action === "createForward" ? [] : await this.originalInlineAttachments(mailbox, messageId, draftPath);
-      for (const att of [...carried, ...attachments]) {
-        await this.graph(`${draftPath}/attachments`, {
-          method: "POST",
-          body: {
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            name: att.filename,
-            contentType: att.contentType,
-            contentBytes: att.content.toString("base64"),
-            ...(att.contentId ? { isInline: true, contentId: att.contentId } : {}),
-          },
-        });
-      }
+      // The original's quoted images are best-effort: a rejected upload just leaves that
+      // quoted image broken. The caller's own attachments stay fail-hard.
+      for (const att of carried) await this.addDraftAttachment(draftPath, att).catch(() => {});
+      for (const att of attachments) await this.addDraftAttachment(draftPath, att);
       await this.graph(`${draftPath}/send`, { method: "POST" });
     } catch (err) {
       await this.graph(draftPath, { method: "DELETE" }).catch(() => {});
