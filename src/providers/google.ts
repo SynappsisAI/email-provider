@@ -70,7 +70,11 @@ export class GoogleEmailProvider implements EmailProvider {
       if (ch === "," && !inQuotes && !inAngle) { parts.push(cur); cur = ""; } else cur += ch;
     }
     parts.push(cur);
-    return parts.map(GoogleEmailProvider.parseAddress).filter((a) => a.address);
+    // Unbalanced quote/bracket → the "protected" commas are a lie; split on every comma instead
+    // (the pre-0.4.1 behavior) so a malformed `<evil@x, ok@y` can't hide an address inside one
+    // token. Consumers must still validate each address strictly.
+    const list = inQuotes || inAngle ? header.split(",") : parts;
+    return list.map(GoogleEmailProvider.parseAddress).filter((a) => a.address);
   }
 
   private static getHeader(headers: gmail_v1.Schema$MessagePartHeader[], name: string): string {

@@ -17,7 +17,8 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
   Si el `Reply-To` existe pero no trae ninguna dirección utilizable, se responde al `From`.
 - **Direcciones con coma en el nombre (`"Soporte, Acme" <t@acme.com>`) se partían en dos**
   y las sin nombre (`<a@x.com>`) conservaban los `<>` en la dirección (Gmail). El parser
-  ahora respeta comillas y corchetes, y descarta entradas vacías.
+  ahora respeta comillas y corchetes (si quedan sin cerrar, vuelve a partir por cada coma,
+  para no esconder direcciones dentro de un token malformado), y descarta entradas vacías.
 
 ### Added
 
