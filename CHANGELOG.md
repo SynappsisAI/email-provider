@@ -15,6 +15,11 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
   de Microsoft Graph y cualquier cliente de correo — p.ej. un sistema de tickets que envía
   desde `notificaciones@` con `Reply-To: ticket-123@` recibe la respuesta en el ticket.
   Si el `Reply-To` existe pero no trae ninguna dirección utilizable, se responde al `From`.
+- **Seguridad: el reply nativo de Gmail podía responder a más direcciones que las que el
+  consumidor validó.** `readMessage` parsea el `From` como UNA dirección, pero el reply lo
+  partía por comas: `From: evil@evil.com, <ok@allowed.com>` se validaba como `ok@allowed.com`
+  y la respuesta iba también a `evil@evil.com`. Ahora el reply usa el mismo parse del `From`.
+  Preexistente (≤ v0.4.0).
 - **Direcciones con coma en el nombre (`"Soporte, Acme" <t@acme.com>`) se partían en dos**
   y las sin nombre (`<a@x.com>`) conservaban los `<>` en la dirección (Gmail). El parser
   ahora respeta comillas y corchetes (si quedan sin cerrar, vuelve a partir por cada coma,

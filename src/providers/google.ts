@@ -315,9 +315,12 @@ export class GoogleEmailProvider implements EmailProvider {
     // the same rule Graph's native reply and every mail client follow.
     const origReplyTo = GoogleEmailProvider.getHeader(headers, "Reply-To");
     const replyToAddrs = GoogleEmailProvider.parseAddressList(origReplyTo).map((a) => a.address);
+    // From is ONE mailbox: parse it exactly as readMessage/toFull does (parseAddress, not the
+    // comma-splitting list parser) so the address a consumer validated from MessageFull.from is
+    // the only one the reply goes to — `From: evil@x, <ok@y>` must not fan out to both.
     const primary = replyToAddrs.length
       ? replyToAddrs
-      : GoogleEmailProvider.parseAddressList(origFrom).map((a) => a.address);
+      : [GoogleEmailProvider.parseAddress(origFrom).address].filter(Boolean);
     const origTo = GoogleEmailProvider.getHeader(headers, "To");
     const origCc = GoogleEmailProvider.getHeader(headers, "Cc");
     const origSubject = GoogleEmailProvider.getHeader(headers, "Subject");
