@@ -49,14 +49,28 @@ export class GoogleEmailProvider implements EmailProvider {
   // ── Parsing helpers ──
 
   private static parseAddress(raw: string): EmailAddress {
-    const match = raw.match(/^(.+?)\s*<(.+?)>$/);
-    if (match) return { name: match[1].trim(), address: match[2].trim() };
+    const match = raw.trim().match(/^(.*?)\s*<([^<>]+)>$/);
+    if (match) {
+      const name = match[1].trim().replace(/^"(.*)"$/, "$1");
+      return name ? { name, address: match[2].trim() } : { address: match[2].trim() };
+    }
     return { address: raw.trim() };
   }
 
+  /** Split on commas OUTSIDE quoted display names and <…> — `"Soporte, Acme" <t@acme.com>`
+   *  is one address, not two. Empty entries are dropped. */
   private static parseAddressList(header: string | undefined): EmailAddress[] {
     if (!header) return [];
-    return header.split(",").map(GoogleEmailProvider.parseAddress);
+    const parts: string[] = [];
+    let cur = "", inQuotes = false, inAngle = false;
+    for (const ch of header) {
+      if (ch === '"' && !inAngle) inQuotes = !inQuotes;
+      else if (ch === "<" && !inQuotes) inAngle = true;
+      else if (ch === ">" && !inQuotes) inAngle = false;
+      if (ch === "," && !inQuotes && !inAngle) { parts.push(cur); cur = ""; } else cur += ch;
+    }
+    parts.push(cur);
+    return parts.map(GoogleEmailProvider.parseAddress).filter((a) => a.address);
   }
 
   private static getHeader(headers: gmail_v1.Schema$MessagePartHeader[], name: string): string {
@@ -162,6 +176,7 @@ export class GoogleEmailProvider implements EmailProvider {
       cc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Cc")),
       bcc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Bcc")),
       replyTo: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Reply-To")),
+      isMailingList: !!(GoogleEmailProvider.getHeader(headers, "List-Id") || GoogleEmailProvider.getHeader(headers, "List-Post")),
       receivedAt: new Date(Number(m.internalDate)).toISOString(),
       isRead: !m.labelIds?.includes("UNREAD"),
       bodyHtml: html,
@@ -295,7 +310,10 @@ export class GoogleEmailProvider implements EmailProvider {
     // A reply goes to Reply-To when the sender set one (RFC 5322 §3.6.2), else to From —
     // the same rule Graph's native reply and every mail client follow.
     const origReplyTo = GoogleEmailProvider.getHeader(headers, "Reply-To");
-    const primary = GoogleEmailProvider.parseAddressList(origReplyTo || origFrom).map((a) => a.address);
+    const replyToAddrs = GoogleEmailProvider.parseAddressList(origReplyTo).map((a) => a.address);
+    const primary = replyToAddrs.length
+      ? replyToAddrs
+      : GoogleEmailProvider.parseAddressList(origFrom).map((a) => a.address);
     const origTo = GoogleEmailProvider.getHeader(headers, "To");
     const origCc = GoogleEmailProvider.getHeader(headers, "Cc");
     const origSubject = GoogleEmailProvider.getHeader(headers, "Subject");

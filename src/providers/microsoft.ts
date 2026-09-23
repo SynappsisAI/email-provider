@@ -99,6 +99,9 @@ export class MicrosoftEmailProvider implements EmailProvider {
       cc: MicrosoftEmailProvider.addrs(m.ccRecipients),
       bcc: MicrosoftEmailProvider.addrs(m.bccRecipients),
       replyTo: MicrosoftEmailProvider.addrs(m.replyTo),
+      isMailingList: ((m.internetMessageHeaders ?? []) as any[]).some((h) =>
+        /^list-(id|post)$/i.test(h?.name ?? ""),
+      ),
       receivedAt: m.receivedDateTime,
       isRead: m.isRead,
       bodyHtml: m.body?.contentType === "html" ? m.body.content : "",
@@ -164,7 +167,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       this.graph(`/users/${mailbox}/messages/${messageId}`, {
         params: {
           $select:
-            "id,subject,from,toRecipients,ccRecipients,bccRecipients,replyTo,receivedDateTime,isRead,body,hasAttachments",
+            "id,subject,from,toRecipients,ccRecipients,bccRecipients,replyTo,internetMessageHeaders,receivedDateTime,isRead,body,hasAttachments",
         },
       }),
       this.graph(`/users/${mailbox}/messages/${messageId}/attachments`, {

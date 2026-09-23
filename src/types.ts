@@ -34,6 +34,10 @@ export interface MessageFull {
   /** `Reply-To` addresses — where a provider-native reply is actually sent (Graph
    *  honors it). Empty when the header is absent. Validate these, not just `from`. */
   replyTo: EmailAddress[];
+  /** True when the message came through a mailing list / group (`List-Id` or `List-Post`
+   *  header). There Reply-To usually points at the whole list, so callers composing a
+   *  private reply may prefer From. */
+  isMailingList: boolean;
   receivedAt: string;
   isRead: boolean;
   bodyHtml: string;

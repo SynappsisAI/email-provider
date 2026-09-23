@@ -14,6 +14,16 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
   responde al `Reply-To` cuando el remitente lo define (RFC 5322), igual que el reply nativo
   de Microsoft Graph y cualquier cliente de correo — p.ej. un sistema de tickets que envía
   desde `notificaciones@` con `Reply-To: ticket-123@` recibe la respuesta en el ticket.
+  Si el `Reply-To` existe pero no trae ninguna dirección utilizable, se responde al `From`.
+- **Direcciones con coma en el nombre (`"Soporte, Acme" <t@acme.com>`) se partían en dos**
+  y las sin nombre (`<a@x.com>`) conservaban los `<>` en la dirección (Gmail). El parser
+  ahora respeta comillas y corchetes, y descarta entradas vacías.
+
+### Added
+
+- **`MessageFull.isMailingList`**: `true` si el mensaje trae `List-Id` o `List-Post` (listas
+  de correo / Google Groups). Ahí el `Reply-To` suele apuntar a toda la lista, así que quien
+  arma una respuesta privada puede preferir el `From`.
 
 ## [0.4.0] — 2026-09-22
 
