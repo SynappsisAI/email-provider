@@ -6,6 +6,15 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-23
+
+### Fixed
+
+- **El reply nativo de Gmail ignoraba el `Reply-To`** y respondía siempre al `From`. Ahora
+  responde al `Reply-To` cuando el remitente lo define (RFC 5322), igual que el reply nativo
+  de Microsoft Graph y cualquier cliente de correo — p.ej. un sistema de tickets que envía
+  desde `notificaciones@` con `Reply-To: ticket-123@` recibe la respuesta en el ticket.
+
 ## [0.4.0] — 2026-09-22
 
 ### Added

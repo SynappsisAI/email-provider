@@ -151,7 +151,8 @@ signature logo; larger files would need an upload session, not implemented). Rep
 also get the original's inline images copied in, so the quoted part renders. On Gmail, a
 forward carries the original's attachments while the encoded message fits in ~24MB; above
 that it goes out body-only (the pre-0.4.0 behavior). `MessageFull.replyTo` exposes the `Reply-To` header —
-where a native reply is actually delivered on Graph — so callers can validate it.
+where a native reply is actually delivered (both providers reply to Reply-To when set,
+else From) — so callers can validate it.
 
 ## Provider setup
 

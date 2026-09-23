@@ -287,11 +287,15 @@ export class GoogleEmailProvider implements EmailProvider {
       userId: "me",
       id: messageId,
       format: "metadata",
-      metadataHeaders: ["From", "To", "Cc", "Subject", "Message-ID", "References"],
+      metadataHeaders: ["From", "Reply-To", "To", "Cc", "Subject", "Message-ID", "References"],
     });
 
     const headers = original.data.payload?.headers ?? [];
     const origFrom = GoogleEmailProvider.getHeader(headers, "From");
+    // A reply goes to Reply-To when the sender set one (RFC 5322 §3.6.2), else to From —
+    // the same rule Graph's native reply and every mail client follow.
+    const origReplyTo = GoogleEmailProvider.getHeader(headers, "Reply-To");
+    const primary = GoogleEmailProvider.parseAddressList(origReplyTo || origFrom).map((a) => a.address);
     const origTo = GoogleEmailProvider.getHeader(headers, "To");
     const origCc = GoogleEmailProvider.getHeader(headers, "Cc");
     const origSubject = GoogleEmailProvider.getHeader(headers, "Subject");
@@ -299,11 +303,9 @@ export class GoogleEmailProvider implements EmailProvider {
     const origReferences = GoogleEmailProvider.getHeader(headers, "References");
 
     const replyTo = replyAll
-      ? [
-          ...GoogleEmailProvider.parseAddressList(origFrom).map((a) => a.address),
-          ...GoogleEmailProvider.parseAddressList(origTo).map((a) => a.address),
-        ].filter((a) => a.toLowerCase() !== mailbox.toLowerCase())
-      : GoogleEmailProvider.parseAddressList(origFrom).map((a) => a.address);
+      ? [...primary, ...GoogleEmailProvider.parseAddressList(origTo).map((a) => a.address)]
+          .filter((a) => a.toLowerCase() !== mailbox.toLowerCase())
+      : primary;
 
     const cc = replyAll
       ? GoogleEmailProvider.parseAddressList(origCc)
