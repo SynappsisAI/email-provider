@@ -98,6 +98,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       to: MicrosoftEmailProvider.addrs(m.toRecipients),
       cc: MicrosoftEmailProvider.addrs(m.ccRecipients),
       bcc: MicrosoftEmailProvider.addrs(m.bccRecipients),
+      replyTo: MicrosoftEmailProvider.addrs(m.replyTo),
       receivedAt: m.receivedDateTime,
       isRead: m.isRead,
       bodyHtml: m.body?.contentType === "html" ? m.body.content : "",
@@ -163,7 +164,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       this.graph(`/users/${mailbox}/messages/${messageId}`, {
         params: {
           $select:
-            "id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,body,hasAttachments",
+            "id,subject,from,toRecipients,ccRecipients,bccRecipients,replyTo,receivedDateTime,isRead,body,hasAttachments",
         },
       }),
       this.graph(`/users/${mailbox}/messages/${messageId}/attachments`, {
@@ -253,6 +254,23 @@ export class MicrosoftEmailProvider implements EmailProvider {
    * attachments), prepend our HTML to its body, add the attachments, send. A failure
    * after the draft exists deletes it so no orphan draft is left behind.
    */
+  private async originalInlineAttachments(mailbox: string, messageId: string): Promise<Attachment[]> {
+    // List metadata only (a full list would pull every attachment's bytes, PDFs included),
+    // then fetch just the inline ones.
+    const base = `/users/${mailbox}/messages/${messageId}/attachments`;
+    const list = await this.graph(base, { params: { $select: "id,isInline" } });
+    const inlineIds = ((list?.value ?? []) as any[]).filter((a) => a.isInline).map((a) => a.id as string);
+    const full = await Promise.all(inlineIds.map((id) => this.graph(`${base}/${id}`)));
+    return full
+      .filter((a: any) => a?.contentId && a.contentBytes && a["@odata.type"] === "#microsoft.graph.fileAttachment")
+      .map((a: any) => ({
+        filename: a.name,
+        contentType: a.contentType,
+        content: Buffer.from(a.contentBytes, "base64"),
+        contentId: String(a.contentId).replace(/^<|>$/g, ""),
+      }));
+  }
+
   private async sendViaDraft(
     mailbox: string,
     messageId: string,
@@ -271,13 +289,18 @@ export class MicrosoftEmailProvider implements EmailProvider {
         ? raw
         : raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r?\n/g, "<br>");
       const bodyTag = quoted.match(/<body[^>]*>/i);
-      const content = bodyTag
-        ? quoted.replace(bodyTag[0], `${bodyTag[0]}${html}`)
+      // Slice, not String.replace: a replacement string would expand `$&`/`$'`/`$$` in the HTML.
+      const content = bodyTag?.index !== undefined
+        ? quoted.slice(0, bodyTag.index + bodyTag[0].length) + html + quoted.slice(bodyTag.index + bodyTag[0].length)
         : `${html}${quoted}`;
       const patch: Record<string, unknown> = { body: { contentType: "HTML", content } };
       if (to) patch.toRecipients = to.map((a) => ({ emailAddress: { address: a } }));
       await this.graph(draftPath, { method: "PATCH", body: patch });
-      for (const att of attachments) {
+      // createReply(All) drafts quote the original's HTML (incl. its cid: images) but don't
+      // carry its inline attachments — copy them so the quote doesn't render broken images.
+      // (createForward already carries every original attachment.)
+      const carried = action === "createForward" ? [] : await this.originalInlineAttachments(mailbox, messageId);
+      for (const att of [...carried, ...attachments]) {
         await this.graph(`${draftPath}/attachments`, {
           method: "POST",
           body: {

@@ -146,6 +146,12 @@ await provider.sendEmail({
 `replyToMessage` / `forwardMessage` also take `attachments` (e.g. a signed reply). On
 Microsoft this switches to Graph's draft flow (`createReply`/`createForward` → patch body →
 add attachments → send) since the one-shot `/reply` and `/forward` only take a `comment`.
+Each attachment on that path is a single Graph upload, so it must be **< 3MB** (fine for a
+signature logo; larger files would need an upload session, not implemented). Reply drafts
+also get the original's inline images copied in, so the quoted part renders. On Gmail, a
+forward carries the original's attachments up to 20MB total; above that it goes out
+body-only (the pre-0.4.0 behavior). `MessageFull.replyTo` exposes the `Reply-To` header —
+where a native reply is actually delivered on Graph — so callers can validate it.
 
 ## Provider setup
 

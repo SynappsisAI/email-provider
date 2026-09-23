@@ -1,6 +1,7 @@
 import { gmail as gmailApi, auth, type gmail_v1 } from "@googleapis/gmail";
 import { buildMime } from "../mime.js";
 import type {
+  Attachment,
   EmailProvider,
   EmailAddress,
   MessageSummary,
@@ -113,22 +114,38 @@ export class GoogleEmailProvider implements EmailProvider {
     return results;
   }
 
-  /** Attachment parts with what a re-send needs, incl. the Content-ID of inline ones. */
+  private static readonly FORWARD_CARRY_MAX_BYTES = 20 * 1024 * 1024;
+
+  /**
+   * Attachment parts with what a re-send needs. A part stays INLINE (keeps its Content-ID)
+   * only when the html actually references it as `cid:` or it is marked
+   * `Content-Disposition: inline` — Outlook stamps a Content-ID on ordinary PDFs too.
+   * Inline parts without a filename (common for pasted images) are kept under a fallback
+   * name, or the forwarded html's cid: refs would break.
+   */
   private static collectParts(
     part: gmail_v1.Schema$MessagePart | undefined,
-  ): { attachmentId: string; filename: string; contentType: string; contentId?: string }[] {
+    html: string,
+  ): { attachmentId: string; filename: string; contentType: string; size: number; contentId?: string }[] {
     if (!part) return [];
-    const results: { attachmentId: string; filename: string; contentType: string; contentId?: string }[] = [];
-    if (part.filename && part.body?.attachmentId) {
-      const cid = GoogleEmailProvider.getHeader(part.headers ?? [], "Content-ID").replace(/^<|>$/g, "");
-      results.push({
-        attachmentId: part.body.attachmentId,
-        filename: part.filename,
-        contentType: part.mimeType ?? "application/octet-stream",
-        ...(cid ? { contentId: cid } : {}),
-      });
+    const results: { attachmentId: string; filename: string; contentType: string; size: number; contentId?: string }[] = [];
+    if (part.body?.attachmentId) {
+      const headers = part.headers ?? [];
+      const cid = GoogleEmailProvider.getHeader(headers, "Content-ID").replace(/^<|>$/g, "");
+      const disposition = GoogleEmailProvider.getHeader(headers, "Content-Disposition").toLowerCase();
+      const inline = !!cid && (html.includes(`cid:${cid}`) || disposition.startsWith("inline"));
+      if (part.filename || inline) {
+        const contentType = part.mimeType ?? "application/octet-stream";
+        results.push({
+          attachmentId: part.body.attachmentId,
+          filename: part.filename || `inline-${part.partId ?? "0"}.${contentType.split("/")[1] ?? "bin"}`,
+          contentType,
+          size: part.body.size ?? 0,
+          ...(inline ? { contentId: cid } : {}),
+        });
+      }
     }
-    for (const sub of part.parts ?? []) results.push(...GoogleEmailProvider.collectParts(sub));
+    for (const sub of part.parts ?? []) results.push(...GoogleEmailProvider.collectParts(sub, html));
     return results;
   }
 
@@ -143,6 +160,7 @@ export class GoogleEmailProvider implements EmailProvider {
       to: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "To")),
       cc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Cc")),
       bcc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Bcc")),
+      replyTo: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Reply-To")),
       receivedAt: new Date(Number(m.internalDate)).toISOString(),
       isRead: !m.labelIds?.includes("UNREAD"),
       bodyHtml: html,
@@ -332,15 +350,22 @@ export class GoogleEmailProvider implements EmailProvider {
     const subject = origSubject.startsWith("Fwd:") ? origSubject : `Fwd: ${origSubject}`;
 
     // Carry the original's attachments (previously dropped), keeping inline images inline
-    // so the forwarded body's own cid: references still resolve.
-    const original = await Promise.all(
-      GoogleEmailProvider.collectParts(fullMsg.data.payload ?? undefined).map(async (p) => ({
-        filename: p.filename,
-        contentType: p.contentType,
-        content: (await this.getAttachment(mailbox, messageId, p.attachmentId)).content,
-        ...(p.contentId ? { contentId: p.contentId } : {}),
-      })),
-    );
+    // so the forwarded body's own cid: references still resolve. Over the cap (Gmail sends
+    // ≤25MB of attachments, and the MIME is held in memory ~3x) fall back to the old
+    // body-only forward rather than fail.
+    const parts = GoogleEmailProvider.collectParts(fullMsg.data.payload ?? undefined, originalContent);
+    const carryOriginals = parts.reduce((n, p) => n + p.size, 0) <= GoogleEmailProvider.FORWARD_CARRY_MAX_BYTES;
+    const original: Attachment[] = [];
+    if (carryOriginals) {
+      for (const p of parts) {
+        original.push({
+          filename: p.filename,
+          contentType: p.contentType,
+          content: (await this.getAttachment(mailbox, messageId, p.attachmentId)).content,
+          ...(p.contentId ? { contentId: p.contentId } : {}),
+        });
+      }
+    }
     const all = [...original, ...(attachments ?? [])];
     const raw = buildMime({ from: mailbox, to, subject, html: forwardBody, attachments: all.length ? all : undefined });
 

@@ -31,6 +31,9 @@ export interface MessageFull {
   to: EmailAddress[];
   cc: EmailAddress[];
   bcc: EmailAddress[];
+  /** `Reply-To` addresses — where a provider-native reply is actually sent (Graph
+   *  honors it). Empty when the header is absent. Validate these, not just `from`. */
+  replyTo: EmailAddress[];
   receivedAt: string;
   isRead: boolean;
   bodyHtml: string;

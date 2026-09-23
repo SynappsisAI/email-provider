@@ -15,12 +15,20 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
   se usa el flujo de borrador (`createReply`/`createReplyAll`/`createForward` → PATCH del
   cuerpo con nuestro HTML arriba del citado → adjuntos → `send`; si algo falla, el borrador
   se borra); sin adjuntos se mantiene el endpoint de un paso de siempre. En Gmail, los
-  adjuntos van al MIME del reply/forward. Retrocompatible.
+  adjuntos van al MIME del reply/forward. Retrocompatible. En Graph cada adjunto de ese
+  camino debe pesar < 3MB (subida simple). Los borradores de reply copian además las
+  imágenes inline del original, para que la cita no salga con imágenes rotas.
+- **`MessageFull.replyTo`** (header `Reply-To`). Graph entrega el reply nativo al
+  `Reply-To`, no al `From`: los consumidores que validan destinatarios (allowlists) deben
+  validarlo también — antes era invisible.
 
 ### Fixed
 
-- **El forward de Gmail perdía los adjuntos del correo original.** Ahora los lleva (las
-  imágenes inline del original siguen inline con su `Content-ID`).
+- **El forward de Gmail perdía los adjuntos del correo original.** Ahora los lleva hasta
+  20MB en total (por encima, sale solo el cuerpo, como antes). Una parte queda inline solo
+  si el HTML la referencia con `cid:` o su disposición es `inline` (Outlook pone
+  `Content-ID` también en PDFs); las imágenes inline sin nombre se conservan con un nombre
+  de respaldo.
 - **Nombres de adjunto con acentos o comillas rompían el header MIME.** Ahora se codifican
   con RFC 2231 (`filename*=UTF-8''…`).
 
