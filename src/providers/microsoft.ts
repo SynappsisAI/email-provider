@@ -111,6 +111,25 @@ export class MicrosoftEmailProvider implements EmailProvider {
     };
   }
 
+  // ── Neutral folder name → Graph well-known folder name ──
+
+  // Shares the neutral names of GoogleEmailProvider.LABEL_TO_FOLDER, except the
+  // Gmail-only "starred"/"important". Anything not listed (real folder ids, Graph
+  // well-known names like "archive") passes through untouched.
+  private static readonly NEUTRAL_TO_FOLDER: Record<string, string> = {
+    inbox: "inbox",
+    sent: "sentitems",
+    drafts: "drafts",
+    draft: "drafts",
+    trash: "deleteditems",
+    spam: "junkemail",
+    junk: "junkemail",
+  };
+
+  private static toFolderId(folder: string): string {
+    return MicrosoftEmailProvider.NEUTRAL_TO_FOLDER[folder.trim().toLowerCase()] ?? folder;
+  }
+
   // ── EmailProvider implementation ──
 
   async sendEmail({ mailbox, to, subject, body, cc, bcc, saveToSent, attachments }: SendParams) {
@@ -144,7 +163,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
   async listMessages({ mailbox, folder, limit, offset, unreadOnly }: ListParams): Promise<ListResult> {
     const top = Math.min(limit ?? 25, 100);
     const skip = offset ?? 0;
-    const folderName = folder ?? "inbox";
+    const folderName = MicrosoftEmailProvider.toFolderId(folder ?? "inbox");
 
     const params: Record<string, string> = {
       $top: String(top),
@@ -214,7 +233,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
     if (offset && offset > 0) params.$skip = String(offset);
 
     const basePath = folder
-      ? `/users/${mailbox}/mailFolders/${folder}/messages`
+      ? `/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(folder)}/messages`
       : `/users/${mailbox}/messages`;
 
     const r = await this.graph(basePath, { params });

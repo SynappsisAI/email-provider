@@ -6,6 +6,25 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-10-07
+
+### Fixed
+
+- **Microsoft: los nombres neutros de carpeta (`sent`, `trash`, `spam`, …) ya no
+  fallan contra Graph.** `listMessages` y `searchMessages` de
+  `MicrosoftEmailProvider` enviaban el `folder` crudo a
+  `/mailFolders/{folder}/messages`, y Graph respondía `400 Id is malformed` porque
+  solo acepta ids o sus nombres well-known. Ahora se mapean (sin distinguir
+  mayúsculas ni espacios alrededor) `sent → sentitems`, `trash → deleteditems`,
+  `spam`/`junk → junkemail` y `draft`/`drafts → drafts`; los ids reales y los
+  nombres well-known pasan intactos. Google acepta ahora los mismos alias (`draft`,
+  `junk`), así que `inbox`, `sent`, `drafts`, `trash` y `spam` funcionan igual en
+  ambos providers; `starred`/`important` siguen siendo solo de Gmail. Cierra #5.
+  **Follow-up en AgentFleet:** al bumpear el pin, `normalizeGraphFolder`
+  (`src/core/email-folder.ts`) puede reducirse a sus alias propios (en español y
+  nombres largos como `papelera`, `enviados`, `sent items`); los nombres neutros
+  ya los resuelve esta librería.
+
 ## [0.4.1] — 2026-09-23
 
 ### Fixed

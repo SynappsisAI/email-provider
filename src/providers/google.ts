@@ -196,14 +196,16 @@ export class GoogleEmailProvider implements EmailProvider {
     inbox: "INBOX",
     sent: "SENT",
     drafts: "DRAFT",
+    draft: "DRAFT",
     trash: "TRASH",
     spam: "SPAM",
+    junk: "SPAM",
     starred: "STARRED",
     important: "IMPORTANT",
   };
 
   private static toLabelId(folder: string): string {
-    return GoogleEmailProvider.LABEL_TO_FOLDER[folder.toLowerCase()] ?? folder;
+    return GoogleEmailProvider.LABEL_TO_FOLDER[folder.trim().toLowerCase()] ?? folder;
   }
 
   // ── EmailProvider implementation ──
