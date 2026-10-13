@@ -18,27 +18,52 @@ import type {
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
-// Stamps Exchange Online puts on mail from an authenticated sender of the same
-// organization. Exchange strips or overwrites inbound X-MS-Exchange-* headers, so
-// they can't be forged from outside — unlike From, DKIM or DMARC (internal mail is
-// unsigned: dkim=none, dmarc=none).
+// Stamps Exchange Online puts on mail submitted by an authenticated sender of the
+// same organization. Exchange strips or overwrites inbound X-MS-Exchange-* headers,
+// so they can't be forged from outside — unlike From, DKIM or DMARC (internal mail
+// is unsigned: dkim=none, dmarc=none).
 const INTERNAL_SENDER_STAMPS = new Map([
   ["x-ms-exchange-organization-authas", "internal"],
   ["x-ms-exchange-organization-messagedirectionality", "originating"],
   ["x-ms-exchange-crosstenant-fromentityheader", "hosted"],
 ]);
 
-/** True iff every internal-sender stamp is present exactly once with its expected
- *  value. Names and values compare case-insensitively, values trimmed. Duplicates or
- *  contradictory values → false. Exported for tests; not part of the public API. */
-export function isExchangeInternalSender(
-  headers: { name?: string; value?: string }[] | undefined,
-): boolean {
+// The stamps describe whoever SUBMITTED the message, not the owner of From. A rule
+// redirect / auto-forward resubmits an outside message (spoofed From kept) as
+// internal, so any sign of resubmission or automatic generation disqualifies it.
+const RESUBMISSION_MARKERS = [
+  /^x-ms-exchange-organization-autoforwarded$/,
+  /^x-ms-exchange-inbox-rules-loop$/,
+  /^x-ms-exchange-generated-message-source$/,
+  /^resent-/,
+];
+
+type GraphRecipient = { emailAddress?: { address?: string } } | null | undefined;
+
+/** Microsoft side of `MessageFull.internalSender`, from a Graph message with `from`,
+ *  `sender` and `internetMessageHeaders`. True iff:
+ *   - every internal-sender stamp is present exactly once with its expected value;
+ *   - `sender` and `from` are the same address (rules out send on behalf);
+ *   - no resubmission marker (rule redirect / auto-forward / Resent-*) is present and
+ *     `Auto-Submitted` is absent or `no`.
+ *  Names and values compare case-insensitively, values trimmed. Anything ambiguous →
+ *  false. Exported for tests; not part of the public API. */
+export function isExchangeInternalSender(m: {
+  from?: GraphRecipient;
+  sender?: GraphRecipient;
+  internetMessageHeaders?: { name?: string; value?: string }[] | null;
+}): boolean {
+  const from = (m.from?.emailAddress?.address ?? "").trim().toLowerCase();
+  const sender = (m.sender?.emailAddress?.address ?? "").trim().toLowerCase();
+  if (!from || from !== sender) return false;
+
   const seen = new Map<string, string[]>();
-  for (const h of headers ?? []) {
+  for (const h of m.internetMessageHeaders ?? []) {
     const name = (h?.name ?? "").trim().toLowerCase();
-    if (!INTERNAL_SENDER_STAMPS.has(name)) continue;
-    seen.set(name, [...(seen.get(name) ?? []), (h?.value ?? "").trim().toLowerCase()]);
+    const value = (h?.value ?? "").trim().toLowerCase();
+    if (RESUBMISSION_MARKERS.some((re) => re.test(name))) return false;
+    if (name === "auto-submitted" && value !== "no") return false;
+    if (INTERNAL_SENDER_STAMPS.has(name)) seen.set(name, [...(seen.get(name) ?? []), value]);
   }
   return [...INTERNAL_SENDER_STAMPS].every(([name, expected]) => {
     const values = seen.get(name) ?? [];
@@ -130,7 +155,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       isMailingList: ((m.internetMessageHeaders ?? []) as any[]).some((h) =>
         /^list-(id|post)$/i.test(h?.name ?? ""),
       ),
-      internalSender: isExchangeInternalSender(m.internetMessageHeaders),
+      internalSender: isExchangeInternalSender(m),
       receivedAt: m.receivedDateTime,
       isRead: m.isRead,
       bodyHtml: m.body?.contentType === "html" ? m.body.content : "",
@@ -215,7 +240,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       this.graph(`/users/${mailbox}/messages/${messageId}`, {
         params: {
           $select:
-            "id,subject,from,toRecipients,ccRecipients,bccRecipients,replyTo,internetMessageHeaders,receivedDateTime,isRead,body,hasAttachments",
+            "id,subject,from,sender,toRecipients,ccRecipients,bccRecipients,replyTo,internetMessageHeaders,receivedDateTime,isRead,body,hasAttachments",
         },
       }),
       this.graph(`/users/${mailbox}/messages/${messageId}/attachments`, {

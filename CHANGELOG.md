@@ -6,6 +6,26 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-13
+
+### Security
+
+- **`MessageFull.internalSender` ahora exige que el propio `From` haya enviado el correo,
+  no solo que lo haya enviado alguien de la organización.** En v0.5.0 bastaban los sellos de
+  Exchange (`AuthAs: Internal`, `Originating`, `Hosted`), pero esos describen a quien
+  *envió* el mensaje, no al dueño del `From`: una regla de buzón que redirige un correo
+  externo con `From` falsificado lo reenvía como interno, y un delegado (send on behalf)
+  envía con el `From` de otra persona. Ahora además se requiere que `sender` de Graph sea
+  igual a `from` y que no haya señales de reenvío o generación automática
+  (`X-MS-Exchange-Organization-AutoForwarded`, `X-MS-Exchange-Inbox-Rules-Loop`,
+  `X-MS-Exchange-Generated-Message-Source`, `Resent-*`, `Auto-Submitted` distinto de
+  `no`); ante cualquier ambigüedad, `false`. No detectable: buzones con permiso *SendAs* o
+  apps con `Mail.Send` app-only envían con `sender = from`; esa suplantación la otorga el
+  admin del tenant. Impacto: AgentFleet usa este campo para dejar
+  que un remitente interno actúe como sí mismo (p. ej. cancelar su tarea programada); con
+  v0.5.0 un falso positivo permitía actuar como otra persona. Responde al comentario de
+  review en #6. **Follow-up en AgentFleet:** fijar el pin en `v0.5.1`, no `v0.5.0`.
+
 ## [0.5.0] — 2026-10-13
 
 ### Added

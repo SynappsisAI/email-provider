@@ -158,9 +158,10 @@ else From) — so callers can validate it.
 
 `From` is unauthenticated and spoofable, and DKIM/DMARC can't tell internal mail apart
 (Exchange doesn't sign mail that never leaves the organization: `dkim=none`, `dmarc=none`).
-On Microsoft, `readMessage` sets `MessageFull.internalSender` to `true` only when Exchange
-stamped the message as coming from an authenticated sender of the **same** organization —
-each of these headers present exactly once with this value (case-insensitive):
+On Microsoft, `readMessage` sets `MessageFull.internalSender` to `true` only when the `From`
+address itself sent the message as an authenticated sender of the **same** organization.
+First, Exchange must have stamped it — each of these headers present exactly once with this
+value (case-insensitive):
 
 | Header | Internal | External |
 |---|---|---|
@@ -169,7 +170,21 @@ each of these headers present exactly once with this value (case-insensitive):
 | `X-MS-Exchange-CrossTenant-FromEntityHeader` | `Hosted` | `Internet` |
 
 Exchange strips or overwrites these headers on inbound mail, so they can't be forged from
-outside. Missing, duplicated or contradictory stamps → `false`. On Google it is `undefined`
+outside. But they describe whoever **submitted** the message, not the owner of `From`, so
+it must also hold that:
+
+- Graph's `sender` equals `from` (rules out send-on-behalf), and
+- nothing shows the message was resubmitted or auto-generated: no
+  `X-MS-Exchange-Organization-AutoForwarded`, `X-MS-Exchange-Inbox-Rules-Loop`,
+  `X-MS-Exchange-Generated-Message-Source` or `Resent-*` header, and `Auto-Submitted`
+  absent or `no`. (An inbox-rule redirect of a spoofed outside message would otherwise be
+  resubmitted as internal, keeping the spoofed `From`.)
+
+Not detectable: a mailbox with **SendAs** rights on another, or an app with app-only
+`Mail.Send`, submits as that address and Graph reports `sender = from`. That impersonation
+is granted by the tenant admin; consumers that care must restrict who holds those grants.
+
+Anything missing, duplicated, contradictory or ambiguous → `false`. On Google it is `undefined`
 (no equivalent signal wired yet). Raw headers are deliberately not exposed.
 
 ## Provider setup

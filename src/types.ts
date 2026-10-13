@@ -38,14 +38,18 @@ export interface MessageFull {
    *  header). There Reply-To usually points at the whole list, so callers composing a
    *  private reply may prefer From. */
   isMailingList: boolean;
-  /** Microsoft 365 only: true iff Exchange stamped this message as sent by an authenticated
-   *  sender of the SAME organization. Each header below is present exactly once with the
-   *  expected value:
-   *    X-MS-Exchange-Organization-AuthAs: Internal
-   *    X-MS-Exchange-Organization-MessageDirectionality: Originating
-   *    X-MS-Exchange-CrossTenant-FromEntityHeader: Hosted
-   *  Duplicates or contradictory values → false. undefined = provider can't tell (Google).
-   *  Unlike `from` (spoofable), Exchange strips these headers from inbound mail. */
+  /** Microsoft 365 only: true iff the `from` address itself sent this message as an
+   *  authenticated sender of the SAME organization. All of:
+   *   - each header below is present exactly once with the expected value:
+   *       X-MS-Exchange-Organization-AuthAs: Internal
+   *       X-MS-Exchange-Organization-MessageDirectionality: Originating
+   *       X-MS-Exchange-CrossTenant-FromEntityHeader: Hosted
+   *   - the submitting mailbox (Graph `sender`) equals `from` — no send on behalf. (SendAs
+   *     grants and app-only Mail.Send still yield sender = from: tenant-authorized, undetectable);
+   *   - no sign it was resubmitted or auto-generated (rule redirect, auto-forward,
+   *     `Resent-*`, `Auto-Submitted` other than `no`).
+   *  Anything ambiguous → false. undefined = provider can't tell (Google).
+   *  Unlike `from` alone (spoofable), Exchange strips these stamps from inbound mail. */
   internalSender?: boolean;
   receivedAt: string;
   isRead: boolean;
