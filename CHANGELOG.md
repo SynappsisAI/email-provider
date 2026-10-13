@@ -6,6 +6,29 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-13
+
+### Added
+
+- **`MessageFull.internalSender` (solo Microsoft 365): indica si un correo viene de un
+  remitente autenticado de la MISMA organización.** El `From` es falsificable y DKIM/DMARC
+  no sirven (Exchange no firma el correo interno: `dkim=none`, `dmarc=none`). Ahora
+  `readMessage` devuelve `true` solo si Exchange estampó el mensaje con
+  `X-MS-Exchange-Organization-AuthAs: Internal`,
+  `X-MS-Exchange-Organization-MessageDirectionality: Originating` y
+  `X-MS-Exchange-CrossTenant-FromEntityHeader: Hosted`, cada uno exactamente una vez;
+  duplicados, faltantes o valores contradictorios dan `false`. Exchange borra o sobrescribe
+  esos headers en el correo entrante, así que no se pueden forjar desde afuera (verificado
+  con un envío externo que los traía forjados). En Google queda `undefined`. Retrocompatible
+  (campo opcional nuevo). Habilita que AgentFleet actúe sobre pedidos de remitentes internos
+  (p. ej. cancelar su propia tarea programada respondiendo al correo del resultado; ver
+  AgentFleet#275 y #358). Cierra #6. **Follow-up en AgentFleet:** bumpear el pin a `v0.5.0`.
+
+### Ops
+
+- **Primera suite de tests (`npm test`):** `node:test` vía `tsx`, con fixtures de headers
+  anonimizados en `test/fixtures/`; `npm run typecheck` ahora cubre también `test/`.
+
 ## [0.4.2] — 2026-10-07
 
 ### Fixed

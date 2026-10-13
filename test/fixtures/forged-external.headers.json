@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Received",
+    "value": "from mail.example.net (203.0.113.10) by BN8PR00MB0000.namprd00.prod.outlook.com"
+  },
+  {
+    "name": "Authentication-Results",
+    "value": "spf=pass smtp.mailfrom=example.net; dkim=pass header.d=example.net; dmarc=pass action=none header.from=example.net"
+  },
+  {
+    "name": "From",
+    "value": "Alice <alice@example.net>"
+  },
+  {
+    "name": "To",
+    "value": "agent@contoso.com"
+  },
+  {
+    "name": "Subject",
+    "value": "Re: Report"
+  },
+  {
+    "name": "X-Synappsis-Control",
+    "value": "forge-test"
+  },
+  {
+    "name": "X-MS-Exchange-Organization-AuthAs",
+    "value": "Anonymous"
+  },
+  {
+    "name": "X-MS-Exchange-Organization-MessageDirectionality",
+    "value": "Incoming"
+  },
+  {
+    "name": "X-MS-Exchange-CrossTenant-FromEntityHeader",
+    "value": "Internet"
+  },
+  {
+    "name": "X-MS-Exchange-CrossTenant-AuthAs",
+    "value": "Anonymous"
+  }
+]

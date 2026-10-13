@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Received",
+    "value": "from BN8PR00MB0001.namprd00.prod.outlook.com by BN8PR00MB0000.namprd00.prod.outlook.com"
+  },
+  {
+    "name": "Authentication-Results",
+    "value": "dkim=none (message not signed) header.d=none;dmarc=none action=none header.from=contoso.com;"
+  },
+  {
+    "name": "From",
+    "value": "Bob <bob@contoso.com>"
+  },
+  {
+    "name": "To",
+    "value": "agent@contoso.com"
+  },
+  {
+    "name": "Subject",
+    "value": "Re: Report"
+  },
+  {
+    "name": "X-MS-Exchange-Organization-AuthAs",
+    "value": "Internal"
+  },
+  {
+    "name": "X-MS-Exchange-Organization-AuthSource",
+    "value": "BN8PR00MB0001.namprd00.prod.outlook.com"
+  },
+  {
+    "name": "X-MS-Exchange-Organization-MessageDirectionality",
+    "value": "Originating"
+  },
+  {
+    "name": "X-MS-Exchange-CrossTenant-FromEntityHeader",
+    "value": "Hosted"
+  },
+  {
+    "name": "X-MS-Exchange-CrossTenant-AuthAs",
+    "value": "Internal"
+  }
+]

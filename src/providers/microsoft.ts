@@ -18,6 +18,34 @@ import type {
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
+// Stamps Exchange Online puts on mail from an authenticated sender of the same
+// organization. Exchange strips or overwrites inbound X-MS-Exchange-* headers, so
+// they can't be forged from outside — unlike From, DKIM or DMARC (internal mail is
+// unsigned: dkim=none, dmarc=none).
+const INTERNAL_SENDER_STAMPS = new Map([
+  ["x-ms-exchange-organization-authas", "internal"],
+  ["x-ms-exchange-organization-messagedirectionality", "originating"],
+  ["x-ms-exchange-crosstenant-fromentityheader", "hosted"],
+]);
+
+/** True iff every internal-sender stamp is present exactly once with its expected
+ *  value. Names and values compare case-insensitively, values trimmed. Duplicates or
+ *  contradictory values → false. Exported for tests; not part of the public API. */
+export function isExchangeInternalSender(
+  headers: { name?: string; value?: string }[] | undefined,
+): boolean {
+  const seen = new Map<string, string[]>();
+  for (const h of headers ?? []) {
+    const name = (h?.name ?? "").trim().toLowerCase();
+    if (!INTERNAL_SENDER_STAMPS.has(name)) continue;
+    seen.set(name, [...(seen.get(name) ?? []), (h?.value ?? "").trim().toLowerCase()]);
+  }
+  return [...INTERNAL_SENDER_STAMPS].every(([name, expected]) => {
+    const values = seen.get(name) ?? [];
+    return values.length === 1 && values[0] === expected;
+  });
+}
+
 export class MicrosoftEmailProvider implements EmailProvider {
   readonly name = "microsoft";
   private msalClient: ConfidentialClientApplication;
@@ -102,6 +130,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       isMailingList: ((m.internetMessageHeaders ?? []) as any[]).some((h) =>
         /^list-(id|post)$/i.test(h?.name ?? ""),
       ),
+      internalSender: isExchangeInternalSender(m.internetMessageHeaders),
       receivedAt: m.receivedDateTime,
       isRead: m.isRead,
       bodyHtml: m.body?.contentType === "html" ? m.body.content : "",

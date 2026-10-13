@@ -154,6 +154,24 @@ that it goes out body-only (the pre-0.4.0 behavior). `MessageFull.replyTo` expos
 where a native reply is actually delivered (both providers reply to Reply-To when set,
 else From) — so callers can validate it.
 
+### Internal senders (Microsoft 365)
+
+`From` is unauthenticated and spoofable, and DKIM/DMARC can't tell internal mail apart
+(Exchange doesn't sign mail that never leaves the organization: `dkim=none`, `dmarc=none`).
+On Microsoft, `readMessage` sets `MessageFull.internalSender` to `true` only when Exchange
+stamped the message as coming from an authenticated sender of the **same** organization —
+each of these headers present exactly once with this value (case-insensitive):
+
+| Header | Internal | External |
+|---|---|---|
+| `X-MS-Exchange-Organization-AuthAs` | `Internal` | `Anonymous` |
+| `X-MS-Exchange-Organization-MessageDirectionality` | `Originating` | `Incoming` |
+| `X-MS-Exchange-CrossTenant-FromEntityHeader` | `Hosted` | `Internet` |
+
+Exchange strips or overwrites these headers on inbound mail, so they can't be forged from
+outside. Missing, duplicated or contradictory stamps → `false`. On Google it is `undefined`
+(no equivalent signal wired yet). Raw headers are deliberately not exposed.
+
 ## Provider setup
 
 ### Google Workspace

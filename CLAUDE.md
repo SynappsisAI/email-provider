@@ -48,9 +48,10 @@ base64-encodes buffers inside the MIME body; Microsoft base64-encodes for Graph'
 
 ## Dev workflow
 
-- **Type-check:** `npm run typecheck` (`tsc --noEmit`, strict mode). This is the
-  only gate — there is no build and no test suite yet. Type-check before every
-  commit.
+- **Type-check:** `npm run typecheck` (`tsc --noEmit`, strict mode, covers `src/`
+  and `test/`). **Tests:** `npm test` (`node:test` via `tsx`, files in
+  `test/*.test.ts`, anonymized fixtures in `test/fixtures/`). Run both before every
+  commit. There is no build.
 - **No build step.** `main` and `types` both point at `src/index.ts`; consumers
   import the TypeScript source directly (synmail via `tsx`, AgentFleet via esbuild).
   Do not add a `dist/` step — it breaks the git-URL install model.
