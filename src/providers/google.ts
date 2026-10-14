@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { gmail as gmailApi, auth, type gmail_v1 } from "@googleapis/gmail";
 import { buildMime } from "../mime.js";
+import { assertOriginHeaderName, classifyKind, originHeaderPair, readOrigin } from "../headers.js";
 import type {
   Attachment,
+  ConversationMessageParams,
   EmailProvider,
   EmailAddress,
   MessageSummary,
@@ -22,9 +25,11 @@ export class GoogleEmailProvider implements EmailProvider {
   readonly name = "google";
   private credentials: Record<string, unknown>;
   private gmailClients = new Map<string, gmail_v1.Gmail>();
+  private originHeader?: string;
 
   constructor(config: GoogleProviderConfig) {
     this.credentials = config.serviceAccountKey;
+    this.originHeader = config.originHeader === undefined ? undefined : assertOriginHeaderName(config.originHeader);
   }
 
   /** Get or create a Gmail client for the given delegated user (cached). */
@@ -101,6 +106,9 @@ export class GoogleEmailProvider implements EmailProvider {
     return { html, text };
   }
 
+  /** Headers a MessageSummary is built from (metadata-format gets). */
+  private static readonly SUMMARY_HEADERS = ["From", "To", "Cc", "Subject", "Message-ID"];
+
   private static toSummary(m: gmail_v1.Schema$Message): MessageSummary {
     const headers = m.payload?.headers ?? [];
     return {
@@ -108,6 +116,9 @@ export class GoogleEmailProvider implements EmailProvider {
       subject: GoogleEmailProvider.getHeader(headers, "Subject"),
       from: GoogleEmailProvider.parseAddress(GoogleEmailProvider.getHeader(headers, "From")),
       to: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "To")),
+      cc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Cc")),
+      conversationId: m.threadId ?? undefined,
+      internetMessageId: GoogleEmailProvider.getHeader(headers, "Message-ID") || undefined,
       receivedAt: new Date(Number(m.internalDate)).toISOString(),
       isRead: !m.labelIds?.includes("UNREAD"),
       preview: m.snippet ?? "",
@@ -168,16 +179,33 @@ export class GoogleEmailProvider implements EmailProvider {
     return results;
   }
 
-  private static toFull(m: gmail_v1.Schema$Message): MessageFull {
+  /** A calendar invite's text/calendar body part — not an attached .ics file. */
+  private static hasInvitePart(part: gmail_v1.Schema$MessagePart | undefined): boolean {
+    if (!part) return false;
+    const disposition = GoogleEmailProvider.getHeader(part.headers ?? [], "Content-Disposition").toLowerCase();
+    const isInvite = part.mimeType?.toLowerCase() === "text/calendar" && !part.filename && !disposition.startsWith("attachment");
+    return isInvite || (part.parts ?? []).some(GoogleEmailProvider.hasInvitePart);
+  }
+
+  private static toFull(m: gmail_v1.Schema$Message, originHeader?: string): MessageFull {
     const headers = m.payload?.headers ?? [];
     const { html, text } = GoogleEmailProvider.decodeBody(m.payload ?? undefined);
     const attachments = GoogleEmailProvider.extractAttachments(m.payload ?? undefined);
+    const from = GoogleEmailProvider.parseAddress(GoogleEmailProvider.getHeader(headers, "From"));
     return {
       id: m.id!,
       subject: GoogleEmailProvider.getHeader(headers, "Subject"),
-      from: GoogleEmailProvider.parseAddress(GoogleEmailProvider.getHeader(headers, "From")),
+      from,
       to: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "To")),
       cc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Cc")),
+      conversationId: m.threadId ?? undefined,
+      internetMessageId: GoogleEmailProvider.getHeader(headers, "Message-ID") || undefined,
+      kind: classifyKind({
+        headers,
+        fromAddress: from.address,
+        hasCalendarPart: GoogleEmailProvider.hasInvitePart(m.payload ?? undefined),
+      }),
+      origin: readOrigin(originHeader, headers),
       bcc: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Bcc")),
       replyTo: GoogleEmailProvider.parseAddressList(GoogleEmailProvider.getHeader(headers, "Reply-To")),
       isMailingList: !!(GoogleEmailProvider.getHeader(headers, "List-Id") || GoogleEmailProvider.getHeader(headers, "List-Post")),
@@ -210,9 +238,10 @@ export class GoogleEmailProvider implements EmailProvider {
 
   // ── EmailProvider implementation ──
 
-  async sendEmail({ mailbox, to, subject, body, cc, bcc, attachments }: SendParams) {
+  async sendEmail({ mailbox, to, subject, body, cc, bcc, attachments, origin }: SendParams) {
     const gmail = this.getGmail(mailbox);
-    const raw = buildMime({ from: mailbox, to, cc, bcc, subject, html: body, attachments });
+    const headers = originHeaderPair(this.originHeader, origin);
+    const raw = buildMime({ from: mailbox, to, cc, bcc, subject, html: body, attachments, headers });
 
     await gmail.users.messages.send({
       userId: "me",
@@ -246,7 +275,7 @@ export class GoogleEmailProvider implements EmailProvider {
           userId: "me",
           id: id!,
           format: "metadata",
-          metadataHeaders: ["From", "To", "Subject"],
+          metadataHeaders: GoogleEmailProvider.SUMMARY_HEADERS,
         });
         return GoogleEmailProvider.toSummary(msg.data);
       })
@@ -265,7 +294,7 @@ export class GoogleEmailProvider implements EmailProvider {
       id: messageId,
       format: "full",
     });
-    return GoogleEmailProvider.toFull(msg.data);
+    return GoogleEmailProvider.toFull(msg.data, this.originHeader);
   }
 
   async searchMessages({ mailbox, query, folder, limit, offset }: SearchParams): Promise<ListResult> {
@@ -289,7 +318,7 @@ export class GoogleEmailProvider implements EmailProvider {
           userId: "me",
           id: id!,
           format: "metadata",
-          metadataHeaders: ["From", "To", "Subject"],
+          metadataHeaders: GoogleEmailProvider.SUMMARY_HEADERS,
         });
         return GoogleEmailProvider.toSummary(msg.data);
       })
@@ -301,8 +330,9 @@ export class GoogleEmailProvider implements EmailProvider {
     };
   }
 
-  async replyToMessage({ mailbox, messageId, body, replyAll, attachments }: ReplyParams) {
+  async replyToMessage({ mailbox, messageId, body, replyAll, attachments, origin }: ReplyParams) {
     const gmail = this.getGmail(mailbox);
+    const extraHeaders = originHeaderPair(this.originHeader, origin);
 
     const original = await gmail.users.messages.get({
       userId: "me",
@@ -350,6 +380,7 @@ export class GoogleEmailProvider implements EmailProvider {
       html: body,
       inReplyTo: origMessageId,
       references: origReferences ? `${origReferences} ${origMessageId}` : origMessageId,
+      headers: extraHeaders,
       attachments,
     });
 
@@ -359,8 +390,9 @@ export class GoogleEmailProvider implements EmailProvider {
     });
   }
 
-  async forwardMessage({ mailbox, messageId, to, comment, attachments }: ForwardParams) {
+  async forwardMessage({ mailbox, messageId, to, comment, attachments, origin }: ForwardParams) {
     const gmail = this.getGmail(mailbox);
+    const extraHeaders = originHeaderPair(this.originHeader, origin);
 
     const fullMsg = await gmail.users.messages.get({
       userId: "me",
@@ -399,7 +431,14 @@ export class GoogleEmailProvider implements EmailProvider {
       }
     }
     const all = [...original, ...(attachments ?? [])];
-    const raw = buildMime({ from: mailbox, to, subject, html: forwardBody, attachments: all.length ? all : undefined });
+    const raw = buildMime({
+      from: mailbox,
+      to,
+      subject,
+      html: forwardBody,
+      headers: extraHeaders,
+      attachments: all.length ? all : undefined,
+    });
 
     await gmail.users.messages.send({
       userId: "me",
@@ -469,5 +508,125 @@ export class GoogleEmailProvider implements EmailProvider {
     );
 
     return folders;
+  }
+
+  /** Message ids matching a Gmail search, as summaries. */
+  private async summariesFor(mailbox: string, q: string, labelIds?: string[]): Promise<MessageSummary[]> {
+    const gmail = this.getGmail(mailbox);
+    const list = await gmail.users.messages.list({ userId: "me", q, labelIds, maxResults: 10 });
+    return Promise.all(
+      (list.data.messages ?? []).map(async ({ id }) => {
+        const msg = await gmail.users.messages.get({
+          userId: "me",
+          id: id!,
+          format: "metadata",
+          metadataHeaders: GoogleEmailProvider.SUMMARY_HEADERS,
+        });
+        return GoogleEmailProvider.toSummary(msg.data);
+      }),
+    );
+  }
+
+  async findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]> {
+    // rfc822msgid: takes the id without angle brackets. Keep only Message-ID characters
+    // (RFC 5322 atext, '.', '@') so a remote sender's value can't add search operators.
+    const bare = internetMessageId.trim().replace(/^<|>$/g, "").replace(/[^A-Za-z0-9.@!#$%&'*+\/=?^_`{|}~-]/g, "");
+    if (!bare) return [];
+    return this.summariesFor(mailbox, `rfc822msgid:${bare}`, folder ? [GoogleEmailProvider.toLabelId(folder)] : undefined);
+  }
+
+  async sendConversationMessage(p: ConversationMessageParams): Promise<{ messageId: string }> {
+    const gmail = this.getGmail(p.mailbox);
+    const messageId = `<${randomUUID()}@${p.mailbox.split("@")[1] ?? "localhost"}>`;
+    const raw = buildMime({
+      from: p.mailbox,
+      to: p.to,
+      cc: p.cc,
+      subject: p.subject,
+      html: p.html,
+      text: p.text,
+      messageId,
+      inReplyTo: p.inReplyTo,
+      references: p.references,
+      headers: [
+        ...originHeaderPair(this.originHeader, p.origin),
+        ...(p.autoSubmitted
+          ? ([["Auto-Submitted", p.autoSubmitted], ["X-Auto-Response-Suppress", "All"]] as [string, string][])
+          : []),
+      ],
+      attachments: p.attachments,
+    });
+    // Gmail files a reply into the sender's thread only when given its threadId.
+    const parent = p.inReplyTo
+      ? (await this.findByInternetMessageId(p.mailbox, p.inReplyTo).catch(() => [])).find(
+          (m) => m.internetMessageId?.trim().toLowerCase() === p.inReplyTo!.trim().toLowerCase(),
+        )
+      : undefined;
+    const sent = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw, threadId: parent?.conversationId },
+    });
+    // Report the Message-ID Gmail actually sent, in case it replaced ours.
+    const meta = await gmail.users.messages
+      .get({ userId: "me", id: sent.data.id!, format: "metadata", metadataHeaders: ["Message-ID"] })
+      .catch(() => undefined);
+    return { messageId: (meta && GoogleEmailProvider.getHeader(meta.data.payload?.headers ?? [], "Message-ID")) || messageId };
+  }
+
+  // A Gmail "folder" is a label; the mutually exclusive system ones act as locations.
+  private static readonly LOCATION_LABELS = ["INBOX", "SPAM", "TRASH"];
+
+  async moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }> {
+    const dest = GoogleEmailProvider.toLabelId(destinationFolder);
+    const gmail = this.getGmail(mailbox);
+    if (dest === "TRASH") {
+      await gmail.users.messages.trash({ userId: "me", id: messageId });
+      return { id: messageId };
+    }
+    await gmail.users.messages.modify({
+      userId: "me",
+      id: messageId,
+      requestBody: {
+        addLabelIds: [dest],
+        removeLabelIds: GoogleEmailProvider.LOCATION_LABELS.filter((l) => l !== dest),
+      },
+    });
+    return { id: messageId };
+  }
+
+  async getOrCreateFolder(mailbox: string, name: string, opts: { parentId?: string; hidden?: boolean } = {}): Promise<Folder> {
+    const gmail = this.getGmail(mailbox);
+    // Nested labels are named "Parent/Child".
+    const parentName = opts.parentId
+      ? (await gmail.users.labels.get({ userId: "me", id: GoogleEmailProvider.toLabelId(opts.parentId) })).data.name
+      : undefined;
+    const fullName = parentName ? `${parentName}/${name}` : name;
+    const find = async () => {
+      const labels = (await gmail.users.labels.list({ userId: "me" })).data.labels ?? [];
+      const hit = labels.find((l) => l.name?.toLowerCase() === fullName.toLowerCase());
+      if (!hit) return undefined;
+      const d = (await gmail.users.labels.get({ userId: "me", id: hit.id! })).data;
+      return { id: d.id!, name: d.name!, totalCount: d.messagesTotal ?? 0, unreadCount: d.messagesUnread ?? 0, childCount: 0 };
+    };
+    const existing = await find();
+    if (existing) return existing;
+    try {
+      const created = await gmail.users.labels.create({
+        userId: "me",
+        requestBody: {
+          name: fullName,
+          labelListVisibility: opts.hidden ? "labelHide" : "labelShow",
+          messageListVisibility: opts.hidden ? "hide" : "show",
+        },
+      });
+      return { id: created.data.id!, name: created.data.name!, totalCount: 0, unreadCount: 0, childCount: 0 };
+    } catch (err: any) {
+      // Lost a create race (409: label name exists).
+      if (err?.code === 409 || err?.status === 409) {
+        const raced = await find();
+        if (raced) return raced;
+      }
+      throw err;
+    }
   }
 }

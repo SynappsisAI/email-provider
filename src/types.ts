@@ -10,6 +10,15 @@ export interface MessageSummary {
   subject: string;
   from: EmailAddress;
   to: EmailAddress[];
+  cc: EmailAddress[];
+  /** The provider's conversation/thread id (Graph `conversationId`, Gmail `threadId`).
+   *  Groups a thread for display only — anyone who knows a subject and a Message-ID can
+   *  join a thread, so never treat it as proof of membership. */
+  conversationId?: string;
+  /** RFC 5322 `Message-ID`, with angle brackets (e.g. `<abc@contoso.com>`). */
+  internetMessageId?: string;
+  /** Microsoft only: id of the folder holding the message. undefined on Google (labels). */
+  parentFolderId?: string;
   receivedAt: string;
   isRead: boolean;
   preview: string;
@@ -24,12 +33,39 @@ export interface AttachmentInfo {
   size: number;
 }
 
+/** What sort of message this is, from headers and provider signals:
+ *  - `ndr`: a non-delivery report / bounce;
+ *  - `read-receipt`: a read or non-read notification;
+ *  - `meeting`: a calendar invite, update, cancellation or response;
+ *  - `auto-reply`: out-of-office or any other automatic message (`Auto-Submitted` other
+ *    than `no`, `Precedence: auto_reply`, Exchange OOF/auto-reply class). Not
+ *    `X-Auto-Response-Suppress`: Exchange adds it to ordinary distribution-group mail;
+ *  - `message`: none of the above. */
+export type MessageKind = "message" | "meeting" | "auto-reply" | "read-receipt" | "ndr";
+
 export interface MessageFull {
   id: string;
   subject: string;
   from: EmailAddress;
   to: EmailAddress[];
   cc: EmailAddress[];
+  /** See `MessageSummary.conversationId`. */
+  conversationId?: string;
+  /** See `MessageSummary.internetMessageId`. */
+  internetMessageId?: string;
+  /** See `MessageSummary.parentFolderId`. */
+  parentFolderId?: string;
+  /** Microsoft only: just what this message added to the thread (Graph `uniqueBody`),
+   *  without quoted replies or forwarded content. Filled per its content type, like
+   *  `bodyHtml`/`bodyText`. undefined on Google. */
+  uniqueBodyHtml?: string;
+  uniqueBodyText?: string;
+  kind: MessageKind;
+  /** Value of the provider config's `originHeader` on this message, trimmed. undefined
+   *  when no `originHeader` is configured or the message doesn't carry it. NOT a security
+   *  signal: anyone can put any X- header on mail they send. Use it to recognize your own
+   *  sends (loops, self-echo), never to trust a sender. */
+  origin?: string;
   bcc: EmailAddress[];
   /** `Reply-To` addresses — where a provider-native reply is actually sent (Graph
    *  honors it). Empty when the header is absent. Validate these, not just `from`. */
@@ -108,7 +144,11 @@ export interface RetrievedAttachment {
   content: Buffer;
 }
 
-export interface SendParams {
+/** Stamped as the provider config's `originHeader` (required when this is set) when the
+ *  message is created. 1–200 printable ASCII characters, e.g. `agentfleet; kind=digest`. */
+type Origin = { origin?: string };
+
+export interface SendParams extends Origin {
   mailbox: string;
   to: string[];
   subject: string;
@@ -116,6 +156,31 @@ export interface SendParams {
   cc?: string[];
   bcc?: string[];
   saveToSent?: boolean;
+  attachments?: Attachment[];
+}
+
+/**
+ * A message sent as raw MIME with caller-controlled threading: no quoted original, no
+ * recipients derived from the parent (never from `Reply-To`), our own `Message-ID`.
+ * Omit `inReplyTo`/`references` to start a new thread.
+ */
+export interface ConversationMessageParams extends Origin {
+  mailbox: string;
+  to: string[];
+  cc?: string[];
+  subject: string;
+  /** HTML body. */
+  html: string;
+  /** Plain-text alternative; sent as `multipart/alternative` with the HTML when set. */
+  text?: string;
+  /** Parent's `Message-ID`, with angle brackets. */
+  inReplyTo?: string;
+  /** Space-separated `Message-ID`s of the thread. Defaults to `inReplyTo` when that is set. */
+  references?: string;
+  /** Adds `Auto-Submitted: <value>` (RFC 3834) and `X-Auto-Response-Suppress: All`, so
+   *  auto-responders (out-of-office, other bots) don't answer it. */
+  autoSubmitted?: "auto-replied" | "auto-generated";
+  /** Inline (`contentId`) images, e.g. a signature, and regular attachments. */
   attachments?: Attachment[];
 }
 
@@ -135,7 +200,7 @@ export interface SearchParams {
   offset?: number;
 }
 
-export interface ReplyParams {
+export interface ReplyParams extends Origin {
   mailbox: string;
   messageId: string;
   body: string;
@@ -145,7 +210,7 @@ export interface ReplyParams {
   attachments?: Attachment[];
 }
 
-export interface ForwardParams {
+export interface ForwardParams extends Origin {
   mailbox: string;
   messageId: string;
   to: string[];
@@ -157,7 +222,13 @@ export interface ForwardParams {
 
 // ── Provider configuration ──
 
-export interface GoogleProviderConfig {
+interface CommonProviderConfig {
+  /** Custom header (`X-…`) that `origin` on a send is stamped as and that
+   *  `MessageFull.origin` is read from, e.g. `"X-AgentFleet-Origin"`. */
+  originHeader?: string;
+}
+
+export interface GoogleProviderConfig extends CommonProviderConfig {
   type: "google";
   /**
    * Parsed Google service account key (the JSON object, not a string).
@@ -168,7 +239,7 @@ export interface GoogleProviderConfig {
   serviceAccountKey: Record<string, unknown>;
 }
 
-export interface MicrosoftProviderConfig {
+export interface MicrosoftProviderConfig extends CommonProviderConfig {
   type: "microsoft";
   /** App registration client ID. */
   clientId: string;
@@ -176,6 +247,12 @@ export interface MicrosoftProviderConfig {
   clientSecret: string;
   /** Azure tenant ID. */
   tenantId: string;
+  /**
+   * Send `Prefer: IdType="ImmutableId"` on every Graph call: message ids then survive a
+   * move between folders. Changes the format of every id the provider returns, so turn it
+   * on before storing ids, not midway.
+   */
+  immutableIds?: boolean;
 }
 
 export type ProviderConfig = GoogleProviderConfig | MicrosoftProviderConfig;
@@ -197,4 +274,15 @@ export interface EmailProvider {
   markAsRead(mailbox: string, messageId: string, isRead: boolean): Promise<void>;
   listFolders(mailbox: string, parentId?: string): Promise<Folder[]>;
   getAttachment(mailbox: string, messageId: string, attachmentId: string): Promise<RetrievedAttachment>;
+  /** Send raw MIME with caller-controlled threading. Returns the sent `Message-ID`. */
+  sendConversationMessage(params: ConversationMessageParams): Promise<{ messageId: string }>;
+  /** Messages whose `Message-ID` is `internetMessageId`, optionally within one folder.
+   *  A just-sent message's Sent copy can take seconds to appear — retry on []. */
+  findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]>;
+  /** Move a message to a folder (id or neutral name). Returns its id afterwards, which on
+   *  Microsoft changes unless `immutableIds` is on. */
+  moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }>;
+  /** The folder named `name` (under `parentId` if given), created if missing. `hidden`
+   *  applies only on creation (Microsoft `isHidden`; Gmail hides the label). */
+  getOrCreateFolder(mailbox: string, name: string, opts?: { parentId?: string; hidden?: boolean }): Promise<Folder>;
 }

@@ -1,0 +1,311 @@
+{
+  "reply": {
+    "subject": "Re: Pedido 1234",
+    "from": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "sender": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "Agent",
+          "address": "agent@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [
+      {
+        "emailAddress": {
+          "name": "Carol",
+          "address": "carol@contoso.com"
+        }
+      }
+    ],
+    "bccRecipients": [],
+    "replyTo": [],
+    "conversationId": "AAQkADAwATM0MDAAMS1hOGQ1LTgzMjQtMDACLTAwCgAQAAbcd",
+    "internetMessageId": "<BN8PR00MB0001.namprd00.prod.outlook.com>",
+    "parentFolderId": "AAMkADAwATM0MDAAMS1hOGQ1AAuAAAAAAA1",
+    "receivedDateTime": "2026-10-13T15:00:00Z",
+    "isRead": false,
+    "hasAttachments": false,
+    "body": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p><hr><p>From: Agent</p><blockquote>¿Confirma el pedido?</blockquote></body></html>"
+    },
+    "uniqueBody": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p></body></html>"
+    },
+    "singleValueExtendedProperties": [
+      {
+        "id": "String 0x1a",
+        "value": "IPM.Note"
+      }
+    ],
+    "id": "AAMkReply==",
+    "internetMessageHeaders": [
+      {
+        "name": "Content-Type",
+        "value": "multipart/alternative; boundary=x"
+      },
+      {
+        "name": "X-AgentFleet-Origin",
+        "value": "agentfleet; kind=reply"
+      }
+    ]
+  },
+  "meeting": {
+    "subject": "Revisión semanal",
+    "from": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "sender": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "Agent",
+          "address": "agent@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [
+      {
+        "emailAddress": {
+          "name": "Carol",
+          "address": "carol@contoso.com"
+        }
+      }
+    ],
+    "bccRecipients": [],
+    "replyTo": [],
+    "conversationId": "AAQkADAwATM0MDAAMS1hOGQ1LTgzMjQtMDACLTAwCgAQAAbcd",
+    "internetMessageId": "<BN8PR00MB0001.namprd00.prod.outlook.com>",
+    "parentFolderId": "AAMkADAwATM0MDAAMS1hOGQ1AAuAAAAAAA1",
+    "receivedDateTime": "2026-10-13T15:00:00Z",
+    "isRead": false,
+    "hasAttachments": false,
+    "body": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p><hr><p>From: Agent</p><blockquote>¿Confirma el pedido?</blockquote></body></html>"
+    },
+    "uniqueBody": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p></body></html>"
+    },
+    "singleValueExtendedProperties": [
+      {
+        "id": "String 0x1a",
+        "value": "IPM.Schedule.Meeting.Request"
+      }
+    ],
+    "id": "AAMkMeeting==",
+    "@odata.type": "#microsoft.graph.eventMessageRequest",
+    "internetMessageHeaders": [
+      {
+        "name": "Content-Type",
+        "value": "multipart/alternative; boundary=x"
+      }
+    ]
+  },
+  "oof": {
+    "subject": "Respuesta automática: Pedido 1234",
+    "from": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "sender": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "Agent",
+          "address": "agent@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [
+      {
+        "emailAddress": {
+          "name": "Carol",
+          "address": "carol@contoso.com"
+        }
+      }
+    ],
+    "bccRecipients": [],
+    "replyTo": [],
+    "conversationId": "AAQkADAwATM0MDAAMS1hOGQ1LTgzMjQtMDACLTAwCgAQAAbcd",
+    "internetMessageId": "<BN8PR00MB0001.namprd00.prod.outlook.com>",
+    "parentFolderId": "AAMkADAwATM0MDAAMS1hOGQ1AAuAAAAAAA1",
+    "receivedDateTime": "2026-10-13T15:00:00Z",
+    "isRead": false,
+    "hasAttachments": false,
+    "body": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p><hr><p>From: Agent</p><blockquote>¿Confirma el pedido?</blockquote></body></html>"
+    },
+    "uniqueBody": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p></body></html>"
+    },
+    "singleValueExtendedProperties": [
+      {
+        "id": "String 0x1a",
+        "value": "IPM.Note.Rules.OofTemplate.Microsoft"
+      }
+    ],
+    "id": "AAMkOof==",
+    "internetMessageHeaders": [
+      {
+        "name": "Auto-Submitted",
+        "value": "auto-generated"
+      },
+      {
+        "name": "X-Auto-Response-Suppress",
+        "value": "All"
+      }
+    ]
+  },
+  "read-receipt": {
+    "subject": "Leído: Pedido 1234",
+    "from": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "sender": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "Agent",
+          "address": "agent@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [
+      {
+        "emailAddress": {
+          "name": "Carol",
+          "address": "carol@contoso.com"
+        }
+      }
+    ],
+    "bccRecipients": [],
+    "replyTo": [],
+    "conversationId": "AAQkADAwATM0MDAAMS1hOGQ1LTgzMjQtMDACLTAwCgAQAAbcd",
+    "internetMessageId": "<BN8PR00MB0001.namprd00.prod.outlook.com>",
+    "parentFolderId": "AAMkADAwATM0MDAAMS1hOGQ1AAuAAAAAAA1",
+    "receivedDateTime": "2026-10-13T15:00:00Z",
+    "isRead": false,
+    "hasAttachments": false,
+    "body": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p><hr><p>From: Agent</p><blockquote>¿Confirma el pedido?</blockquote></body></html>"
+    },
+    "uniqueBody": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p></body></html>"
+    },
+    "singleValueExtendedProperties": [
+      {
+        "id": "String 0x1a",
+        "value": "REPORT.IPM.Note.IPNRN"
+      }
+    ],
+    "id": "AAMkRead==",
+    "internetMessageHeaders": [
+      {
+        "name": "Content-Type",
+        "value": "multipart/report; report-type=disposition-notification; boundary=\"x\""
+      }
+    ]
+  },
+  "ndr": {
+    "subject": "Undeliverable: Pedido 1234",
+    "from": {
+      "emailAddress": {
+        "name": "Microsoft Outlook",
+        "address": "postmaster@contoso.com"
+      }
+    },
+    "sender": {
+      "emailAddress": {
+        "name": "Bob",
+        "address": "bob@contoso.com"
+      }
+    },
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "Agent",
+          "address": "agent@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [
+      {
+        "emailAddress": {
+          "name": "Carol",
+          "address": "carol@contoso.com"
+        }
+      }
+    ],
+    "bccRecipients": [],
+    "replyTo": [],
+    "conversationId": "AAQkADAwATM0MDAAMS1hOGQ1LTgzMjQtMDACLTAwCgAQAAbcd",
+    "internetMessageId": "<BN8PR00MB0001.namprd00.prod.outlook.com>",
+    "parentFolderId": "AAMkADAwATM0MDAAMS1hOGQ1AAuAAAAAAA1",
+    "receivedDateTime": "2026-10-13T15:00:00Z",
+    "isRead": false,
+    "hasAttachments": false,
+    "body": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p><hr><p>From: Agent</p><blockquote>¿Confirma el pedido?</blockquote></body></html>"
+    },
+    "uniqueBody": {
+      "contentType": "html",
+      "content": "<html><body><p>Sí, confirmado.</p></body></html>"
+    },
+    "singleValueExtendedProperties": [
+      {
+        "id": "String 0x1a",
+        "value": "REPORT.IPM.Note.NDR"
+      }
+    ],
+    "id": "AAMkNdr==",
+    "internetMessageHeaders": [
+      {
+        "name": "Content-Type",
+        "value": "multipart/report; report-type=delivery-status; boundary=\"x\""
+      }
+    ]
+  }
+}

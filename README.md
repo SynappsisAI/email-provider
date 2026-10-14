@@ -111,8 +111,15 @@ interface EmailProvider {
   markAsRead(mailbox: string, messageId: string, isRead: boolean): Promise<void>;
   listFolders(mailbox: string, parentId?: string): Promise<Folder[]>;
   getAttachment(mailbox: string, messageId: string, attachmentId: string): Promise<RetrievedAttachment>;
+  sendConversationMessage(params: ConversationMessageParams): Promise<{ messageId: string }>;
+  findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]>;
+  moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }>;
+  getOrCreateFolder(mailbox: string, name: string, opts?: { parentId?: string; hidden?: boolean }): Promise<Folder>;
 }
 ```
+
+Folder arguments accept a real folder/label id or a neutral name: `inbox`, `sent`,
+`drafts`/`draft`, `trash`, `spam`/`junk` (plus `starred`/`important` on Gmail).
 
 `Attachment` and `RetrievedAttachment` use `Buffer` for the file bytes.
 **Callers never see base64.** The library handles whatever encoding the
@@ -153,6 +160,75 @@ forward carries the original's attachments while the encoded message fits in ~24
 that it goes out body-only (the pre-0.4.0 behavior). `MessageFull.replyTo` exposes the `Reply-To` header —
 where a native reply is actually delivered (both providers reply to Reply-To when set,
 else From) — so callers can validate it.
+
+### Threads, ids and message kinds
+
+`MessageSummary` and `MessageFull` carry `cc`, `conversationId` (Graph `conversationId`,
+Gmail `threadId`), `internetMessageId` (the `Message-ID`, with `<>`) and, on Microsoft,
+`parentFolderId`. Never treat `conversationId` as proof that a message belongs to a
+thread: anyone who knows a subject and a `Message-ID` can join one.
+
+`MessageFull` adds:
+
+- `uniqueBodyHtml` / `uniqueBodyText` (Microsoft only): just what this message added,
+  without quoted replies or forwarded content (Graph `uniqueBody`).
+- `kind`: `message`, `meeting`, `auto-reply` (out-of-office, `Auto-Submitted` other than
+  `no`, `Precedence: auto_reply`), `read-receipt` or `ndr`.
+  Microsoft also uses Exchange's message class (`IPM.Schedule.Meeting.*`,
+  `IPM.Note.Rules.OofTemplate.*`, `REPORT.*.IPNRN`, `REPORT.*.NDR`). Gmail spots meetings
+  by an invite's `text/calendar` part; an attached `.ics` file doesn't count.
+  `X-Auto-Response-Suppress` is deliberately ignored: Exchange adds it to ordinary mail
+  delivered through distribution groups, so it would drop real messages.
+
+**Immutable ids (Microsoft).** Set `immutableIds: true` in the Microsoft config to send
+`Prefer: IdType="ImmutableId"` on every Graph call: a message id then survives a move to
+another folder. It changes the format of every id the provider returns, so turn it on
+before you store ids, not midway. Without it, `moveMessage` returns the new id.
+
+**Search and folders (Microsoft).** Graph can't combine `$search` with a `parentFolderId`
+filter. To keep a folder out of search results, filter on `parentFolderId` client-side.
+
+### Origin header
+
+Set `originHeader` in either provider's config (an `X-` header, e.g.
+`"X-AgentFleet-Origin"`) to mark your own sends. Pass `origin` (1–200 printable ASCII
+characters, e.g. `agentfleet; kind=digest`) to `sendEmail`, `replyToMessage`,
+`forwardMessage` or `sendConversationMessage`, and the message carries
+`<originHeader>: <origin>`. Passing `origin` without `originHeader` configured throws.
+`MessageFull.origin` reads it back.
+
+The header is set when the message is created: Graph rejects adding it later. On
+Microsoft, `sendEmail` puts it in `internetMessageHeaders`. A reply or forward with
+`origin` goes through `createReply`/`createReplyAll`/`createForward` with the header in
+the request, then sends that draft, even without attachments. Graph only accepts
+custom headers named `X-…`, which is why `originHeader` must start with `X-`.
+
+`origin` is **not** a security signal. Anyone can put any X- header on mail they send.
+Use it to recognize your own messages (loops, self-echo), never to trust a sender. For
+that, see `internalSender`.
+
+### Conversation messages (raw MIME)
+
+`sendConversationMessage` sends a message as raw MIME (Graph MIME `sendMail`, Gmail
+`messages.send`) with threading you control:
+
+- `inReplyTo` / `references` thread it into an existing conversation. Omit them to start a
+  new one.
+- recipients are exactly `to` / `cc`. Nothing is derived from the parent or its `Reply-To`.
+- there's no quoted original. Graph and Gmail keep the generated `Message-ID`, which is
+  returned so you can find the Sent copy later with `findByInternetMessageId`. On Microsoft
+  the copy shows up in Sent Items a few seconds after sending, so retry until it does.
+- `text` adds a plain-text alternative. Inline (`contentId`) and regular attachments work
+  as in `sendEmail`.
+- `autoSubmitted: "auto-replied"` adds `Auto-Submitted` and `X-Auto-Response-Suppress: All`,
+  so out-of-office replies and other bots don't answer it. Such a message then reads back
+  with `kind: "auto-reply"` and `internalSender: false`. Recognize your own sends by
+  `origin`.
+
+`getOrCreateFolder` finds a folder by name, including hidden ones, or creates it.
+`hidden: true` only takes effect at creation. On Microsoft it sets `isHidden`. On Gmail it
+hides the label, and `parentId` nests it as `Parent/Name`. `moveMessage` on Gmail adds the
+destination label and removes `INBOX`/`SPAM`/`TRASH`.
 
 ### Internal senders (Microsoft 365)
 

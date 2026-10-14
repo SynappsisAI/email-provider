@@ -15,6 +15,7 @@ export type {
   EmailAddress,
   MessageSummary,
   MessageFull,
+  MessageKind,
   AttachmentInfo,
   Folder,
   ListResult,
@@ -22,6 +23,7 @@ export type {
   RetrievedAttachment,
   // Operation params
   SendParams,
+  ConversationMessageParams,
   ListParams,
   SearchParams,
   ReplyParams,

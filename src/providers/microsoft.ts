@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { ConfidentialClientApplication } from "@azure/msal-node";
+import { buildMimeMessage } from "../mime.js";
+import { assertOriginHeaderName, classifyKind, originHeaderPair, readOrigin } from "../headers.js";
 import type {
   Attachment,
+  ConversationMessageParams,
   EmailProvider,
   EmailAddress,
   MessageSummary,
@@ -17,6 +21,23 @@ import type {
 } from "../types.js";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+
+// Fields every MessageSummary needs.
+const SUMMARY_SELECT =
+  "id,subject,from,toRecipients,ccRecipients,conversationId,internetMessageId,parentFolderId,receivedDateTime,isRead,bodyPreview,hasAttachments";
+
+// Exchange's message class (PR_MESSAGE_CLASS) — tells OOF, read receipts, NDRs and
+// meeting items apart where headers alone are unreliable.
+const MESSAGE_CLASS_PROP = "String 0x001A";
+
+/** OData string literal: single quotes doubled. */
+const odataString = (v: string) => `'${v.replace(/'/g, "''")}'`;
+
+class GraphError extends Error {
+  constructor(readonly status: number, readonly code: string | undefined, message: string) {
+    super(message);
+  }
+}
 
 // Stamps Exchange Online puts on mail submitted by an authenticated sender of the
 // same organization. Exchange strips or overwrites inbound X-MS-Exchange-* headers,
@@ -74,8 +95,12 @@ export function isExchangeInternalSender(m: {
 export class MicrosoftEmailProvider implements EmailProvider {
   readonly name = "microsoft";
   private msalClient: ConfidentialClientApplication;
+  private immutableIds: boolean;
+  private originHeader?: string;
 
   constructor(config: MicrosoftProviderConfig) {
+    this.immutableIds = config.immutableIds ?? false;
+    this.originHeader = config.originHeader === undefined ? undefined : assertOriginHeaderName(config.originHeader);
     this.msalClient = new ConfidentialClientApplication({
       auth: {
         clientId: config.clientId,
@@ -97,7 +122,14 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   private async graph(
     path: string,
-    opts: { method?: string; body?: unknown; params?: Record<string, string> } = {}
+    opts: {
+      method?: string;
+      body?: unknown;
+      /** Sent as-is instead of JSON (MIME sendMail). */
+      rawBody?: string;
+      contentType?: string;
+      params?: Record<string, string>;
+    } = {}
   ) {
     const token = await this.getToken();
     const url = new URL(`${GRAPH_BASE}${path}`);
@@ -105,15 +137,22 @@ export class MicrosoftEmailProvider implements EmailProvider {
       for (const [k, v] of Object.entries(opts.params)) url.searchParams.set(k, v);
     }
 
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": opts.contentType ?? "application/json",
+    };
+    if (this.immutableIds) headers.Prefer = 'IdType="ImmutableId"';
+
     const res = await fetch(url.toString(), {
       method: opts.method ?? "GET",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      headers,
+      body: opts.rawBody ?? (opts.body ? JSON.stringify(opts.body) : undefined),
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
-      throw new Error(`Graph API ${res.status}: ${(err as any)?.error?.message ?? res.statusText}`);
+      const e = (err as any)?.error;
+      throw new GraphError(res.status, e?.code, `Graph API ${res.status}: ${e?.message ?? res.statusText}`);
     }
 
     const text = await res.text();
@@ -136,6 +175,10 @@ export class MicrosoftEmailProvider implements EmailProvider {
       subject: m.subject ?? "",
       from: MicrosoftEmailProvider.addr(m.from),
       to: MicrosoftEmailProvider.addrs(m.toRecipients),
+      cc: MicrosoftEmailProvider.addrs(m.ccRecipients),
+      conversationId: m.conversationId ?? undefined,
+      internetMessageId: m.internetMessageId ?? undefined,
+      parentFolderId: m.parentFolderId ?? undefined,
       receivedAt: m.receivedDateTime,
       isRead: m.isRead,
       preview: m.bodyPreview ?? "",
@@ -143,13 +186,30 @@ export class MicrosoftEmailProvider implements EmailProvider {
     };
   }
 
-  private static toFull(m: any): MessageFull {
+  private static toFull(m: any, originHeader?: string): MessageFull {
+    const headers = m.internetMessageHeaders;
+    // Graph echoes the property id normalized ("String 0x1a"), not as requested.
+    const messageClass = ((m.singleValueExtendedProperties ?? []) as any[]).find((p) =>
+      /^string\s+0x0*1a$/i.test(String(p?.id ?? "").trim()),
+    )?.value;
     return {
       id: m.id,
       subject: m.subject ?? "",
       from: MicrosoftEmailProvider.addr(m.from),
       to: MicrosoftEmailProvider.addrs(m.toRecipients),
       cc: MicrosoftEmailProvider.addrs(m.ccRecipients),
+      conversationId: m.conversationId ?? undefined,
+      internetMessageId: m.internetMessageId ?? undefined,
+      parentFolderId: m.parentFolderId ?? undefined,
+      uniqueBodyHtml: m.uniqueBody ? (m.uniqueBody.contentType === "html" ? m.uniqueBody.content : "") : undefined,
+      uniqueBodyText: m.uniqueBody ? (m.uniqueBody.contentType === "text" ? m.uniqueBody.content : "") : undefined,
+      kind: classifyKind({
+        headers,
+        fromAddress: m.from?.emailAddress?.address,
+        messageClass,
+        isEventMessage: /eventmessage/i.test(m["@odata.type"] ?? ""),
+      }),
+      origin: readOrigin(originHeader, headers),
       bcc: MicrosoftEmailProvider.addrs(m.bccRecipients),
       replyTo: MicrosoftEmailProvider.addrs(m.replyTo),
       isMailingList: ((m.internetMessageHeaders ?? []) as any[]).some((h) =>
@@ -186,11 +246,18 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   // ── EmailProvider implementation ──
 
-  async sendEmail({ mailbox, to, subject, body, cc, bcc, saveToSent, attachments }: SendParams) {
+  /** Origin as Graph `internetMessageHeaders` — only settable when the message is created. */
+  private originHeaders(origin: string | undefined) {
+    const pairs = originHeaderPair(this.originHeader, origin);
+    return pairs.length ? { internetMessageHeaders: pairs.map(([name, value]) => ({ name, value })) } : {};
+  }
+
+  async sendEmail({ mailbox, to, subject, body, cc, bcc, saveToSent, attachments, origin }: SendParams) {
     const message: Record<string, unknown> = {
       subject,
       body: { contentType: "HTML", content: body },
       toRecipients: to.map((a) => ({ emailAddress: { address: a } })),
+      ...this.originHeaders(origin),
     };
     if (cc?.length) message.ccRecipients = cc.map((a) => ({ emailAddress: { address: a } }));
     if (bcc?.length) message.bccRecipients = bcc.map((a) => ({ emailAddress: { address: a } }));
@@ -223,7 +290,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       $top: String(top),
       $skip: String(skip),
       $orderby: "receivedDateTime desc",
-      $select: "id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,hasAttachments",
+      $select: SUMMARY_SELECT,
       $count: "true",
     };
     if (unreadOnly) params.$filter = "isRead eq false";
@@ -240,14 +307,15 @@ export class MicrosoftEmailProvider implements EmailProvider {
       this.graph(`/users/${mailbox}/messages/${messageId}`, {
         params: {
           $select:
-            "id,subject,from,sender,toRecipients,ccRecipients,bccRecipients,replyTo,internetMessageHeaders,receivedDateTime,isRead,body,hasAttachments",
+            "id,subject,from,sender,toRecipients,ccRecipients,bccRecipients,replyTo,internetMessageHeaders,conversationId,internetMessageId,parentFolderId,uniqueBody,receivedDateTime,isRead,body,hasAttachments",
+          $expand: `singleValueExtendedProperties($filter=id eq ${odataString(MESSAGE_CLASS_PROP)})`,
         },
       }),
       this.graph(`/users/${mailbox}/messages/${messageId}/attachments`, {
         params: { $select: "id,name,contentType,size" },
       }).catch(() => ({ value: [] })),
     ]);
-    const full = MicrosoftEmailProvider.toFull(r);
+    const full = MicrosoftEmailProvider.toFull(r, this.originHeader);
     full.attachments = (attRes.value as any[]).map((a: any) => ({
       id: a.id,
       filename: a.name,
@@ -282,7 +350,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
     const params: Record<string, string> = {
       $search: `"${query}"`,
       $top: String(top),
-      $select: "id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,hasAttachments",
+      $select: SUMMARY_SELECT,
     };
     if (offset && offset > 0) params.$skip = String(offset);
 
@@ -297,9 +365,11 @@ export class MicrosoftEmailProvider implements EmailProvider {
     };
   }
 
-  async replyToMessage({ mailbox, messageId, body, replyAll, attachments }: ReplyParams) {
-    if (attachments?.length) {
-      await this.sendViaDraft(mailbox, messageId, replyAll ? "createReplyAll" : "createReply", body, attachments);
+  // An origin header can only be set when the message is created, and only the
+  // create* (draft) actions were verified to take it — so origin routes via the draft.
+  async replyToMessage({ mailbox, messageId, body, replyAll, attachments, origin }: ReplyParams) {
+    if (attachments?.length || origin !== undefined) {
+      await this.sendViaDraft(mailbox, messageId, replyAll ? "createReplyAll" : "createReply", body, attachments ?? [], undefined, origin);
       return;
     }
     const action = replyAll ? "replyAll" : "reply";
@@ -309,9 +379,9 @@ export class MicrosoftEmailProvider implements EmailProvider {
     });
   }
 
-  async forwardMessage({ mailbox, messageId, to, comment, attachments }: ForwardParams) {
-    if (attachments?.length) {
-      await this.sendViaDraft(mailbox, messageId, "createForward", comment ?? "", attachments, to);
+  async forwardMessage({ mailbox, messageId, to, comment, attachments, origin }: ForwardParams) {
+    if (attachments?.length || origin !== undefined) {
+      await this.sendViaDraft(mailbox, messageId, "createForward", comment ?? "", attachments ?? [], to, origin);
       return;
     }
     await this.graph(`/users/${mailbox}/messages/${messageId}/forward`, {
@@ -391,8 +461,13 @@ export class MicrosoftEmailProvider implements EmailProvider {
     html: string,
     attachments: Attachment[],
     to?: string[],
+    origin?: string,
   ) {
-    const draft = await this.graph(`/users/${mailbox}/messages/${messageId}/${action}`, { method: "POST", body: {} });
+    const headers = this.originHeaders(origin);
+    const draft = await this.graph(`/users/${mailbox}/messages/${messageId}/${action}`, {
+      method: "POST",
+      body: "internetMessageHeaders" in headers ? { message: headers } : {},
+    });
     const draftPath = `/users/${mailbox}/messages/${draft.id}`;
     try {
       // The draft's quoted body follows the mailbox's compose format — normalize a
@@ -440,12 +515,96 @@ export class MicrosoftEmailProvider implements EmailProvider {
       params: { $select: "id,displayName,totalItemCount,unreadItemCount,childFolderCount" },
     });
 
-    return (r.value as any[]).map((f) => ({
+    return (r.value as any[]).map(MicrosoftEmailProvider.toFolder);
+  }
+
+  private static toFolder(f: any): Folder {
+    return {
       id: f.id,
       name: f.displayName,
-      totalCount: f.totalItemCount,
-      unreadCount: f.unreadItemCount,
-      childCount: f.childFolderCount,
-    }));
+      totalCount: f.totalItemCount ?? 0,
+      unreadCount: f.unreadItemCount ?? 0,
+      childCount: f.childFolderCount ?? 0,
+    };
+  }
+
+  async sendConversationMessage(p: ConversationMessageParams): Promise<{ messageId: string }> {
+    const messageId = `<${randomUUID()}@${p.mailbox.split("@")[1] ?? "localhost"}>`;
+    const mime = buildMimeMessage({
+      from: p.mailbox,
+      to: p.to,
+      cc: p.cc,
+      subject: p.subject,
+      html: p.html,
+      text: p.text,
+      messageId,
+      inReplyTo: p.inReplyTo,
+      references: p.references,
+      headers: [
+        ...originHeaderPair(this.originHeader, p.origin),
+        ...(p.autoSubmitted
+          ? ([["Auto-Submitted", p.autoSubmitted], ["X-Auto-Response-Suppress", "All"]] as [string, string][])
+          : []),
+      ],
+      attachments: p.attachments,
+    });
+    // Graph's MIME send: the whole message, standard base64, as text/plain. Graph keeps
+    // our Message-ID and threading headers, and saves the copy to Sent Items.
+    await this.graph(`/users/${p.mailbox}/sendMail`, {
+      method: "POST",
+      rawBody: Buffer.from(mime).toString("base64"),
+      contentType: "text/plain",
+    });
+    return { messageId };
+  }
+
+  async findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]> {
+    const path = folder
+      ? `/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(folder)}/messages`
+      : `/users/${mailbox}/messages`;
+    const r = await this.graph(path, {
+      params: { $filter: `internetMessageId eq ${odataString(internetMessageId)}`, $select: SUMMARY_SELECT, $top: "10" },
+    });
+    return (r.value as any[]).map(MicrosoftEmailProvider.toSummary);
+  }
+
+  async moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }> {
+    const r = await this.graph(`/users/${mailbox}/messages/${messageId}/move`, {
+      method: "POST",
+      body: { destinationId: MicrosoftEmailProvider.toFolderId(destinationFolder) },
+    });
+    return { id: r.id };
+  }
+
+  async getOrCreateFolder(mailbox: string, name: string, opts: { parentId?: string; hidden?: boolean } = {}): Promise<Folder> {
+    const base = opts.parentId
+      ? `/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(opts.parentId)}/childFolders`
+      : `/users/${mailbox}/mailFolders`;
+    const find = async () => {
+      const r = await this.graph(base, {
+        params: {
+          $filter: `displayName eq ${odataString(name)}`,
+          $select: "id,displayName,totalItemCount,unreadItemCount,childFolderCount",
+          // Hidden folders are left out of listings unless asked for.
+          includeHiddenFolders: "true",
+        },
+      });
+      const f = (r.value as any[])[0];
+      return f ? MicrosoftEmailProvider.toFolder(f) : undefined;
+    };
+    const existing = await find();
+    if (existing) return existing;
+    try {
+      // isHidden can only be set at creation.
+      const f = await this.graph(base, { method: "POST", body: { displayName: name, isHidden: opts.hidden ?? false } });
+      return MicrosoftEmailProvider.toFolder(f);
+    } catch (err) {
+      // Lost a create race: someone made it between our lookup and the POST.
+      if (err instanceof GraphError && err.status === 409) {
+        const raced = await find();
+        if (raced) return raced;
+      }
+      throw err;
+    }
   }
 }

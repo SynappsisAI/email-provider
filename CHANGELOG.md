@@ -6,6 +6,60 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-13
+
+### Added
+
+- **Campos de hilo en los mensajes.** `MessageSummary` y `MessageFull` traen ahora `cc`,
+  `conversationId` (Graph `conversationId`, Gmail `threadId`), `internetMessageId` y, en
+  Microsoft, `parentFolderId`. `MessageFull` además trae `uniqueBodyHtml`/`uniqueBodyText`
+  (solo Microsoft: solo lo que el mensaje agregó, sin citas) y `kind` (`message`, `meeting`,
+  `auto-reply`, `read-receipt`, `ndr`), calculado a partir de headers y, en Microsoft, de la
+  clase de mensaje de Exchange. A diferencia de lo que sugería #7, `X-Auto-Response-Suppress`
+  no cuenta como auto-respuesta: Exchange lo agrega al correo normal que llega por listas de
+  distribución, y tomarlo como señal descartaría mensajes reales. En Gmail, un `.ics`
+  adjunto no convierte el mensaje en `meeting`; solo la parte de invitación. Habilita que AgentFleet trate el buzón del agente como
+  conversaciones (AgentFleet#275, P0 del plan `PLAN-EMAIL-AS-CHAT.md`).
+- **Header de origen configurable.** La config de cualquier provider acepta `originHeader`
+  (p. ej. `X-AgentFleet-Origin`). `origin` en `sendEmail`, `replyToMessage`,
+  `forwardMessage` y `sendConversationMessage` lo estampa al crear el mensaje, y
+  `MessageFull.origin` lo devuelve al leer. El nombre del header no queda fijo en la
+  librería, que sigue siendo agnóstica del consumidor. No es una señal de seguridad:
+  cualquiera puede poner un header X-.
+- **`sendConversationMessage`: envío por MIME con hilo controlado por quien llama.**
+  `In-Reply-To`/`References` opcionales, destinatarios exactos (nunca derivados del
+  `Reply-To`), `Message-ID` propio devuelto al caller, alternativa en texto plano, imágenes
+  inline y adjuntos, y `autoSubmitted` (`Auto-Submitted` + `X-Auto-Response-Suppress: All`)
+  para cortar loops con respuestas automáticas.
+- **`findByInternetMessageId`, `moveMessage` y `getOrCreateFolder`** (con carpetas ocultas)
+  en ambos providers. En Gmail, una "carpeta" es un label.
+- **IDs inmutables opcionales en Microsoft:** `immutableIds: true` envía
+  `Prefer: IdType="ImmutableId"` en cada llamada a Graph, así el id de un mensaje sobrevive
+  a un cambio de carpeta.
+
+### Changed
+
+- **BREAKING — el contrato `EmailProvider` tiene 4 métodos nuevos**
+  (`sendConversationMessage`, `findByInternetMessageId`, `moveMessage`,
+  `getOrCreateFolder`), y `MessageSummary.cc` y `MessageFull.kind` son campos
+  obligatorios nuevos. Quien implemente `EmailProvider` o construya esos tipos (mocks en
+  tests) tiene que agregarlos. Quien solo consume la librería no cambia nada. Coordinar con
+  synmail y AgentFleet al bumpear el pin.
+- **En Microsoft, un reply o forward con `origin` pasa por el flujo de borrador**
+  (`createReply`/`createForward` → enviar), aunque no lleve adjuntos: Graph solo acepta el
+  header al crear el mensaje, y solo se verificó en las acciones `create*`. Sin `origin` se
+  sigue usando el endpoint de un paso.
+- **El builder MIME codifica en base64 las partes de texto (HTML y texto plano).** Antes el
+  HTML iba sin codificar; las líneas largas y el contenido no ASCII ahora sobreviven a
+  cualquier relay.
+
+### Security
+
+- **Gmail: inyección de headers por CR/LF en valores del caller.** Un asunto, destinatario o
+  `In-Reply-To` con salto de línea podía agregar headers arbitrarios (p. ej. un `Bcc`) al
+  MIME enviado. El builder ahora quita CR/LF de todo valor de header. Preexistente
+  (≤ v0.5.1).
+
 ## [0.5.1] — 2026-10-13
 
 ### Security
