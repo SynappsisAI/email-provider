@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { gmail as gmailApi, auth, type gmail_v1 } from "@googleapis/gmail";
 import { buildMime } from "../mime.js";
+import { decodeCursor, encodeCursor, nextCursor, pageSizeOf, parseSince } from "../cursor.js";
 import { assertOriginHeaderName, classifyKind, originHeaderPair, readOrigin } from "../headers.js";
 import type {
   Attachment,
@@ -15,6 +16,8 @@ import type {
   RetrievedAttachment,
   SendParams,
   ListParams,
+  ListSinceParams,
+  ListSinceResult,
   SearchParams,
   ReplyParams,
   ForwardParams,
@@ -285,6 +288,99 @@ export class GoogleEmailProvider implements EmailProvider {
       messages,
       totalCount: list.data.resultSizeEstimate ?? messages.length,
     };
+  }
+
+  /** Max concurrent `messages.get` calls (5 quota units each) while building a page. */
+  private static readonly GET_CONCURRENCY = 10;
+  /** Hard stop for one second holding more messages than this (never seen in practice). */
+  private static readonly MAX_IDS_PER_SECOND = 5000;
+
+  /** Ids matching `q` with `labelIds`, up to `cap`; `more` when Gmail has further pages. */
+  private async listIds(gmail: gmail_v1.Gmail, q: string, labelIds: string[], cap: number, allPages = false) {
+    const ids: string[] = [];
+    let pageToken: string | undefined;
+    do {
+      const r = await gmail.users.messages.list({ userId: "me", q, labelIds, maxResults: Math.min(cap, 500), pageToken });
+      ids.push(...(r.data.messages ?? []).map((m) => m.id!));
+      pageToken = r.data.nextPageToken ?? undefined;
+      if (allPages && ids.length > GoogleEmailProvider.MAX_IDS_PER_SECOND) {
+        throw new Error("listSince: too many messages in one second to page through");
+      }
+    } while (allPages && pageToken);
+    return { ids, more: !!pageToken };
+  }
+
+  /**
+   * Gmail lists newest-first without dates and with no guaranteed order, and `after:` /
+   * `before:` only have second granularity. So: find a time window [lo, hi) seconds
+   * starting at the cursor that holds few enough ids (halving `hi` while Gmail reports
+   * more pages), fetch those messages' metadata, keep exactly [cursor, hi) by
+   * `internalDate`, sort ascending, and return the oldest page. An empty window moves on
+   * to the rest of the range. Keyset cursor (see cursor.ts) — never an offset.
+   */
+  async listSince({ mailbox, since, folder, unreadOnly, limit, pageToken }: ListSinceParams): Promise<ListSinceResult> {
+    const gmail = this.getGmail(mailbox);
+    const pageSize = pageSizeOf(limit);
+    const prev = pageToken ? decodeCursor(pageToken, "google") : undefined;
+    let fromMs = prev ? prev.t : parseSince(since);
+    let seen = new Set(prev?.ids ?? []);
+    const labelIds = [GoogleEmailProvider.toLabelId(folder ?? "inbox")];
+    const cap = Math.min(Math.max(pageSize * 2, 50), 500);
+    // Exclusive end of the whole walk, in seconds, past anything already received.
+    const end = Math.floor(Date.now() / 1000) + 2;
+
+    let lo = Math.floor(fromMs / 1000);
+    let hi = end;
+    // Smallest end seen to overflow from the current lo. An empty [lo, hi) means everything
+    // that overflowed lies in [hi, overflowHi), so the search resumes there instead of
+    // restarting from `end` — keeps the whole search O(log range) list calls.
+    let overflowHi: number | undefined;
+    for (let guard = 0; guard < 200; guard++) {
+      // ±1 s margins absorb after:/before: inclusiveness; the exact bounds are applied below.
+      const q = `after:${lo - 1} before:${hi + 1}${unreadOnly ? " is:unread" : ""}`;
+      let { ids, more } = await this.listIds(gmail, q, labelIds, cap);
+      if (more && hi - lo > 1) {
+        overflowHi = hi;
+        hi = lo + Math.floor((hi - lo) / 2);
+        continue;
+      }
+      if (more) ids = (await this.listIds(gmail, q, labelIds, 500, true)).ids;
+
+      const window: MessageSummary[] = [];
+      for (let i = 0; i < ids.length; i += GoogleEmailProvider.GET_CONCURRENCY) {
+        const got = await Promise.all(
+          ids.slice(i, i + GoogleEmailProvider.GET_CONCURRENCY).map((id) =>
+            gmail.users.messages
+              .get({ userId: "me", id, format: "metadata", metadataHeaders: GoogleEmailProvider.SUMMARY_HEADERS })
+              .then((r) => r.data)
+              // Deleted between list and get: it's gone, skip it.
+              .catch((err: any) => (err?.code === 404 || err?.status === 404 ? undefined : Promise.reject(err))),
+          ),
+        );
+        for (const m of got) {
+          if (!m) continue;
+          const t = Number(m.internalDate);
+          if (t >= fromMs && t < hi * 1000 && !seen.has(m.id!)) window.push(GoogleEmailProvider.toSummary(m));
+        }
+      }
+      const time = (m: MessageSummary) => Date.parse(m.receivedAt);
+      window.sort((a, b) => time(a) - time(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+      if (!window.length) {
+        if (hi === end) return { messages: [] };
+        // Nothing left in this window: continue with the rest of the range.
+        fromMs = hi * 1000;
+        seen = new Set();
+        lo = hi;
+        hi = overflowHi ?? end;
+        overflowHi = undefined;
+        continue;
+      }
+      const page = window.slice(0, pageSize);
+      if (window.length <= pageSize && hi === end) return { messages: page };
+      return { messages: page, nextPageToken: encodeCursor(nextCursor("google", page, time, (m) => m.id, prev)) };
+    }
+    throw new Error("listSince: could not settle on a time window");
   }
 
   async readMessage(mailbox: string, messageId: string): Promise<MessageFull> {

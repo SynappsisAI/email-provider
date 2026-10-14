@@ -192,6 +192,27 @@ export interface ListParams {
   unreadOnly?: boolean;
 }
 
+export interface ListSinceParams {
+  mailbox: string;
+  /** ISO timestamp, INCLUSIVE: messages with `receivedAt >= since`. */
+  since: string;
+  /** Folder id or neutral name. Default `inbox`. */
+  folder?: string;
+  unreadOnly?: boolean;
+  /** Page size. Default 25, max 100. */
+  limit?: number;
+  /** Opaque; the previous call's `nextPageToken`. Pass the same other params with it. */
+  pageToken?: string;
+}
+
+export interface ListSinceResult {
+  /** Ascending by `receivedAt` (ties in a stable order), continuing after the previous page. */
+  messages: MessageSummary[];
+  /** Absent = no more messages since `since`. A page can be short (even empty) WITH a
+   *  token; only a missing token means the end. */
+  nextPageToken?: string;
+}
+
 export interface SearchParams {
   mailbox: string;
   query: string;
@@ -276,6 +297,9 @@ export interface EmailProvider {
   getAttachment(mailbox: string, messageId: string, attachmentId: string): Promise<RetrievedAttachment>;
   /** Send raw MIME with caller-controlled threading. Returns the sent `Message-ID`. */
   sendConversationMessage(params: ConversationMessageParams): Promise<{ messageId: string }>;
+  /** Messages received at or after `since`, OLDEST first, with a continuation token that
+   *  stays correct while the mailbox changes (messages marked read or moved mid-walk). */
+  listSince(params: ListSinceParams): Promise<ListSinceResult>;
   /** Messages whose `Message-ID` is `internetMessageId`, optionally within one folder.
    *  A just-sent message's Sent copy can take seconds to appear — retry on []. */
   findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]>;

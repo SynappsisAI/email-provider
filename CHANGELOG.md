@@ -6,6 +6,29 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-13
+
+### Added
+
+- **`listSince`: mensajes desde un watermark, del más viejo al más nuevo, con token de
+  continuación estable.** Devuelve los mensajes con `receivedAt >= since` en orden
+  ascendente y un `nextPageToken` que retoma exactamente donde quedó la página anterior,
+  aunque entre llamadas se marquen mensajes como leídos, se muevan o se borren. Corrige de
+  raíz el bug de correo perdido de AgentFleet (#275): el detector de email-watch listaba
+  los 50 más nuevos por tick y, en una ráfaga de más de 50, los más viejos quedaban debajo
+  del watermark y nunca se procesaban. El token es un cursor por tiempo + ids ya devueltos,
+  no un offset: el `@odata.nextLink` de Graph para mensajes usa `$skip` (documentado), y en
+  Gmail `maxResults` tiene tope de 500 y el orden no está garantizado, así que paginar por
+  offset pierde mensajes. En Gmail cada página acota una ventana de tiempo, pide metadata con
+  máximo 10 llamadas simultáneas y filtra `internalDate` exacto. Una página corta o vacía
+  puede traer token; solo la falta de token significa que no hay más. Cierra #8.
+  **Follow-up en AgentFleet:** bumpear el pin a `v0.7.0` y usar `listSince` en el detector.
+
+### Changed
+
+- **BREAKING — `EmailProvider` agrega el método `listSince`.** Quien implemente la interfaz
+  (mocks en tests) tiene que agregarlo; a quien solo consume la librería no le cambia nada.
+
 ## [0.6.0] — 2026-10-13
 
 ### Added

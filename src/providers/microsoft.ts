@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ConfidentialClientApplication } from "@azure/msal-node";
 import { buildMimeMessage } from "../mime.js";
+import { decodeCursor, encodeCursor, nextCursor, pageSizeOf, parseSince } from "../cursor.js";
 import { assertOriginHeaderName, classifyKind, originHeaderPair, readOrigin } from "../headers.js";
 import type {
   Attachment,
@@ -14,6 +15,8 @@ import type {
   RetrievedAttachment,
   SendParams,
   ListParams,
+  ListSinceParams,
+  ListSinceResult,
   SearchParams,
   ReplyParams,
   ForwardParams,
@@ -300,6 +303,38 @@ export class MicrosoftEmailProvider implements EmailProvider {
       messages: (r.value as any[]).map(MicrosoftEmailProvider.toSummary),
       totalCount: r["@odata.count"] ?? r.value.length,
     };
+  }
+
+  /**
+   * Keyset paging (see cursor.ts), not `@odata.nextLink`: Graph builds a message list's
+   * nextLink from `$skip`, so a message dropping out mid-walk (read under unreadOnly,
+   * moved) would shift the next one past the page boundary.
+   */
+  async listSince({ mailbox, since, folder, unreadOnly, limit, pageToken }: ListSinceParams): Promise<ListSinceResult> {
+    const pageSize = pageSizeOf(limit);
+    const prev = pageToken ? decodeCursor(pageToken, "microsoft") : undefined;
+    const fromMs = prev ? prev.t : parseSince(since);
+    const seen = new Set(prev?.ids ?? []);
+    // Asking for seen + pageSize guarantees pageSize unseen messages whenever that many exist.
+    const top = seen.size + pageSize;
+    if (top > 1000) throw new Error("listSince: too many messages share one receive time to page past them");
+
+    const folderName = MicrosoftEmailProvider.toFolderId(folder ?? "inbox");
+    let filter = `receivedDateTime ge ${new Date(fromMs).toISOString()}`;
+    if (unreadOnly) filter += " and isRead eq false";
+    const r = await this.graph(`/users/${mailbox}/mailFolders/${folderName}/messages`, {
+      // Graph requires $orderby properties to lead the $filter, in the same order.
+      params: { $filter: filter, $orderby: "receivedDateTime asc", $top: String(top), $select: SUMMARY_SELECT },
+    });
+    const value = r.value as any[];
+    const page = value.filter((m) => !seen.has(m.id)).slice(0, pageSize).map(MicrosoftEmailProvider.toSummary);
+    const more = value.length >= top || !!r["@odata.nextLink"];
+    if (!more) return { messages: page };
+    // A short server page holding only already-seen ids: no progress this call, but not
+    // the end either — hand back the same cursor rather than claim there's nothing left.
+    if (!page.length) return { messages: [], nextPageToken: encodeCursor({ p: "microsoft", t: fromMs, ids: [...seen] }) };
+    const time = (m: MessageSummary) => Date.parse(m.receivedAt);
+    return { messages: page, nextPageToken: encodeCursor(nextCursor("microsoft", page, time, (m) => m.id, prev)) };
   }
 
   async readMessage(mailbox: string, messageId: string): Promise<MessageFull> {

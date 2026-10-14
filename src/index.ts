@@ -25,6 +25,8 @@ export type {
   SendParams,
   ConversationMessageParams,
   ListParams,
+  ListSinceParams,
+  ListSinceResult,
   SearchParams,
   ReplyParams,
   ForwardParams,

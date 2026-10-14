@@ -112,6 +112,7 @@ interface EmailProvider {
   listFolders(mailbox: string, parentId?: string): Promise<Folder[]>;
   getAttachment(mailbox: string, messageId: string, attachmentId: string): Promise<RetrievedAttachment>;
   sendConversationMessage(params: ConversationMessageParams): Promise<{ messageId: string }>;
+  listSince(params: ListSinceParams): Promise<ListSinceResult>;
   findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]>;
   moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }>;
   getOrCreateFolder(mailbox: string, name: string, opts?: { parentId?: string; hidden?: boolean }): Promise<Folder>;
@@ -187,6 +188,38 @@ before you store ids, not midway. Without it, `moveMessage` returns the new id.
 
 **Search and folders (Microsoft).** Graph can't combine `$search` with a `parentFolderId`
 filter. To keep a folder out of search results, filter on `parentFolderId` client-side.
+
+### Polling for new mail: `listSince`
+
+To pick up everything that arrived after a watermark, use `listSince`, not
+`listMessages` with `offset`:
+
+```ts
+let pageToken: string | undefined;
+do {
+  const page = await provider.listSince({ mailbox, since: watermark, unreadOnly: true, limit: 50, pageToken });
+  for (const m of page.messages) handle(m);   // oldest first
+  pageToken = page.nextPageToken;             // absent = caught up
+} while (pageToken /* and this tick's batch budget allows */);
+```
+
+- `since` is inclusive (`receivedAt >= since`). Messages sharing the watermark's timestamp
+  come back again on the next walk, so de-dupe them by id.
+- Pages are ascending by `receivedAt` and continue exactly where the previous one stopped,
+  even if messages are marked read, moved or deleted between calls. A page can be short or
+  empty and still carry a `nextPageToken`; only a missing token means the end.
+- The token is a keyset cursor: the time of the last message returned plus the ids already
+  returned at that time. Offset paging can't be made correct here. Graph's message
+  `@odata.nextLink` is `$skip`-based, so a message dropping out mid-walk shifts the next one
+  past the page boundary. Gmail caps `maxResults` at 500 and doesn't guarantee list order.
+- On Gmail, `after:`/`before:` only have second granularity and list results carry no dates.
+  Each page finds a time window with few enough ids, fetches their metadata (at most 10
+  `messages.get` in flight), and filters `internalDate` exactly.
+- A message moved INTO the folder keeps its original receive time, so if that time is older
+  than the watermark, the walk won't see it.
+- Every watermark poller trusts that mail shows up in receive-time order. If a message with
+  an earlier timestamp could become listable after a later one was already returned (e.g.
+  search-index lag), overlap the watermark by a few minutes and de-dupe by id.
 
 ### Origin header
 
