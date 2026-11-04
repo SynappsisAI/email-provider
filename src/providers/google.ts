@@ -1,11 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { gmail as gmailApi, auth, type gmail_v1 } from "@googleapis/gmail";
-import { buildMime } from "../mime.js";
+import { buildMime, newMessageId } from "../mime.js";
 import { decodeCursor, encodeCursor, nextCursor, pageSizeOf, parseSince } from "../cursor.js";
 import { assertOriginHeaderName, classifyKind, originHeaderPair, readOrigin } from "../headers.js";
 import type {
   Attachment,
   ConversationMessageParams,
+  DraftParams,
+  DraftRef,
   EmailProvider,
   EmailAddress,
   MessageSummary,
@@ -23,6 +24,12 @@ import type {
   ForwardParams,
   GoogleProviderConfig,
 } from "../types.js";
+
+/** HTTP status of a googleapis/gaxios error. gaxios 7 puts it in `status`; `code` may be a
+ *  string (e.g. ERR_BAD_REQUEST) or, in older shapes, the status number. */
+function httpStatus(err: any): number | undefined {
+  return [err?.status, err?.response?.status, err?.code].find((v) => typeof v === "number");
+}
 
 export class GoogleEmailProvider implements EmailProvider {
   readonly name = "google";
@@ -83,6 +90,21 @@ export class GoogleEmailProvider implements EmailProvider {
     // token. Consumers must still validate each address strictly.
     const list = inQuotes || inAngle ? header.split(",") : parts;
     return list.map(GoogleEmailProvider.parseAddress).filter((a) => a.address);
+  }
+
+  /** `list` without duplicates (case-insensitive), entries without an `@`, or anything in
+   *  `exclude`, first occurrence kept. */
+  private static uniqueAddresses(list: string[], exclude: string[]): string[] {
+    const seen = new Set(exclude.map((a) => a.toLowerCase()));
+    const out: string[] = [];
+    for (const a of list) {
+      const key = a.toLowerCase();
+      if (a.includes("@") && !seen.has(key)) {
+        seen.add(key);
+        out.push(a);
+      }
+    }
+    return out;
   }
 
   private static getHeader(headers: gmail_v1.Schema$MessagePartHeader[], name: string): string {
@@ -241,10 +263,16 @@ export class GoogleEmailProvider implements EmailProvider {
 
   // ── EmailProvider implementation ──
 
-  async sendEmail({ mailbox, to, subject, body, cc, bcc, attachments, origin }: SendParams) {
-    const gmail = this.getGmail(mailbox);
+  /** MIME of a new message — shared by `sendEmail` and `createDraft`. */
+  private newMessageMime({ mailbox, to, subject, body, cc, bcc, attachments, origin }: DraftParams, messageId?: string): string {
     const headers = originHeaderPair(this.originHeader, origin);
-    const raw = buildMime({ from: mailbox, to, cc, bcc, subject, html: body, attachments, headers });
+    return buildMime({ from: mailbox, to, cc, bcc, subject, html: body, attachments, headers, messageId });
+  }
+
+  async sendEmail(params: SendParams) {
+    const { mailbox } = params;
+    const gmail = this.getGmail(mailbox);
+    const raw = this.newMessageMime(params);
 
     await gmail.users.messages.send({
       userId: "me",
@@ -354,7 +382,7 @@ export class GoogleEmailProvider implements EmailProvider {
               .get({ userId: "me", id, format: "metadata", metadataHeaders: GoogleEmailProvider.SUMMARY_HEADERS })
               .then((r) => r.data)
               // Deleted between list and get: it's gone, skip it.
-              .catch((err: any) => (err?.code === 404 || err?.status === 404 ? undefined : Promise.reject(err))),
+              .catch((err: any) => (httpStatus(err) === 404 ? undefined : Promise.reject(err))),
           ),
         );
         for (const m of got) {
@@ -426,7 +454,20 @@ export class GoogleEmailProvider implements EmailProvider {
     };
   }
 
-  async replyToMessage({ mailbox, messageId, body, replyAll, attachments, origin }: ReplyParams) {
+  async replyToMessage(params: ReplyParams) {
+    const { raw, threadId } = await this.replyMime(params);
+    await this.getGmail(params.mailbox).users.messages.send({
+      userId: "me",
+      requestBody: { raw, threadId },
+    });
+  }
+
+  /** MIME of a reply / reply-all and the thread to file it in — shared by
+   *  `replyToMessage` and `createReplyDraft`. */
+  private async replyMime(
+    { mailbox, messageId, body, replyAll, attachments, origin }: ReplyParams,
+    ownMessageId?: string,
+  ): Promise<{ raw: string; threadId?: string }> {
     const gmail = this.getGmail(mailbox);
     const extraHeaders = originHeaderPair(this.originHeader, origin);
 
@@ -442,7 +483,11 @@ export class GoogleEmailProvider implements EmailProvider {
     // A reply goes to Reply-To when the sender set one (RFC 5322 §3.6.2), else to From —
     // the same rule Graph's native reply and every mail client follow.
     const origReplyTo = GoogleEmailProvider.getHeader(headers, "Reply-To");
-    const replyToAddrs = GoogleEmailProvider.parseAddressList(origReplyTo).map((a) => a.address);
+    // Unusable Reply-To entries (no `@`, e.g. a bare list name) are dropped first, so From
+    // is still the fallback when none is left.
+    const replyToAddrs = GoogleEmailProvider.parseAddressList(origReplyTo)
+      .map((a) => a.address)
+      .filter((a) => a.includes("@"));
     // From is ONE mailbox: parse it exactly as readMessage/toFull does (parseAddress, not the
     // comma-splitting list parser) so the address a consumer validated from MessageFull.from is
     // the only one the reply goes to — `From: evil@x, <ok@y>` must not fan out to both.
@@ -455,18 +500,30 @@ export class GoogleEmailProvider implements EmailProvider {
     const origMessageId = GoogleEmailProvider.getHeader(headers, "Message-ID");
     const origReferences = GoogleEmailProvider.getHeader(headers, "References");
 
-    const replyTo = replyAll
-      ? [...primary, ...GoogleEmailProvider.parseAddressList(origTo).map((a) => a.address)]
-          .filter((a) => a.toLowerCase() !== mailbox.toLowerCase())
-      : primary;
-
-    const cc = replyAll
-      ? GoogleEmailProvider.parseAddressList(origCc)
-          .map((a) => a.address)
-          .filter((a) => a.toLowerCase() !== mailbox.toLowerCase())
+    // Each address once (case-insensitive); To wins over Cc. Reply-all leaves the mailbox
+    // itself out; a plain reply goes to `primary` even when that is the mailbox (a
+    // follow-up to its own sent message).
+    // Only real addresses: `MAILER-DAEMON`, `undisclosed-recipients:;` and the like are dropped.
+    const exclude = replyAll ? [mailbox] : [];
+    const replyTo = GoogleEmailProvider.uniqueAddresses(
+      replyAll ? [...primary, ...GoogleEmailProvider.parseAddressList(origTo).map((a) => a.address)] : primary,
+      exclude,
+    );
+    let cc = replyAll
+      ? GoogleEmailProvider.uniqueAddresses(GoogleEmailProvider.parseAddressList(origCc).map((a) => a.address), [...exclude, ...replyTo])
       : undefined;
+    // Only Cc left (e.g. reply-all to the mailbox's note to itself): promote it to To rather
+    // than write an empty To header.
+    if (!replyTo.length && cc?.length) {
+      replyTo.push(...cc);
+      cc = undefined;
+    }
+    // messages.send would reject a reply with no recipient; drafts.create would save it
+    // silently, so refuse here for both.
+    if (!replyTo.length) throw new Error(`reply to ${messageId}: no recipient (no usable Reply-To/From)`);
 
-    const subject = origSubject.startsWith("Re:") ? origSubject : `Re: ${origSubject}`;
+    // Case-insensitive: Outlook writes "RE:".
+    const subject = /^re:/i.test(origSubject) ? origSubject : `Re: ${origSubject}`;
 
     const raw = buildMime({
       from: mailbox,
@@ -474,19 +531,30 @@ export class GoogleEmailProvider implements EmailProvider {
       cc,
       subject,
       html: body,
+      messageId: ownMessageId,
       inReplyTo: origMessageId,
       references: origReferences ? `${origReferences} ${origMessageId}` : origMessageId,
       headers: extraHeaders,
       attachments,
     });
 
-    await gmail.users.messages.send({
+    return { raw, threadId: original.data.threadId ?? undefined };
+  }
+
+  async forwardMessage(params: ForwardParams) {
+    const raw = await this.forwardMime(params);
+    await this.getGmail(params.mailbox).users.messages.send({
       userId: "me",
-      requestBody: { raw, threadId: original.data.threadId ?? undefined },
+      requestBody: { raw },
     });
   }
 
-  async forwardMessage({ mailbox, messageId, to, comment, attachments, origin }: ForwardParams) {
+  /** MIME of a forward (comment above the original, original's attachments carried) —
+   *  shared by `forwardMessage` and `createForwardDraft`. */
+  private async forwardMime(
+    { mailbox, messageId, to, comment, attachments, origin }: ForwardParams,
+    ownMessageId?: string,
+  ): Promise<string> {
     const gmail = this.getGmail(mailbox);
     const extraHeaders = originHeaderPair(this.originHeader, origin);
 
@@ -505,7 +573,7 @@ export class GoogleEmailProvider implements EmailProvider {
       ? `${comment}<br><br>---------- Forwarded message ----------<br>${originalContent}`
       : `---------- Forwarded message ----------<br>${originalContent}`;
 
-    const subject = origSubject.startsWith("Fwd:") ? origSubject : `Fwd: ${origSubject}`;
+    const subject = /^fwd?:/i.test(origSubject) ? origSubject : `Fwd: ${origSubject}`;
 
     // Carry the original's attachments (previously dropped), keeping inline images inline
     // so the forwarded body's own cid: references still resolve. Over the cap (Gmail sends
@@ -527,19 +595,83 @@ export class GoogleEmailProvider implements EmailProvider {
       }
     }
     const all = [...original, ...(attachments ?? [])];
-    const raw = buildMime({
+    return buildMime({
       from: mailbox,
       to,
       subject,
       html: forwardBody,
+      messageId: ownMessageId,
       headers: extraHeaders,
       attachments: all.length ? all : undefined,
     });
+  }
 
-    await gmail.users.messages.send({
+  // ── Drafts ──
+  // Same MIME as the matching send, handed to drafts.create instead of messages.send.
+  // Nothing on these paths calls messages.send or drafts.send. Each draft gets our own
+  // Message-ID so the caller always has one to find it by.
+
+  async createDraft(params: DraftParams): Promise<DraftRef> {
+    const ownId = newMessageId(params.mailbox);
+    return this.saveDraft(params.mailbox, this.newMessageMime(params, ownId), ownId);
+  }
+
+  async createReplyDraft(params: ReplyParams): Promise<DraftRef> {
+    const ownId = newMessageId(params.mailbox);
+    const { raw, threadId } = await this.replyMime(params, ownId);
+    return this.saveDraft(params.mailbox, raw, ownId, threadId);
+  }
+
+  async createForwardDraft(params: ForwardParams): Promise<DraftRef> {
+    const ownId = newMessageId(params.mailbox);
+    return this.saveDraft(params.mailbox, await this.forwardMime(params, ownId), ownId);
+  }
+
+  private async saveDraft(mailbox: string, raw: string, ownId: string, threadId?: string): Promise<DraftRef> {
+    const gmail = this.getGmail(mailbox);
+    const created = await gmail.users.drafts.create({
       userId: "me",
-      requestBody: { raw },
+      requestBody: { message: { raw, threadId } },
     });
+    const id = created.data.message?.id;
+    if (!created.data.id || !id) {
+      // Don't leave a draft behind that the caller can't see or delete.
+      if (created.data.id) await gmail.users.drafts.delete({ userId: "me", id: created.data.id }).catch(() => {});
+      throw new Error("Gmail drafts.create returned no draft or message id");
+    }
+    return {
+      id,
+      draftId: created.data.id,
+      // drafts.create keeps the Message-ID we wrote (Gmail may replace it on edit/send).
+      internetMessageId: ownId,
+      conversationId: created.data.message?.threadId ?? undefined,
+    };
+  }
+
+  /** drafts.delete only knows draft ids, so a received/sent message's id can't hit it:
+   *  Gmail answers 404 (or 400 `invalidArgument` for an id it can't parse) and nothing is
+   *  deleted. Any other 400 (e.g. an auth/delegation failure) propagates as is. Gmail
+   *  deletes a draft permanently. */
+  async deleteDraft(mailbox: string, draftId: string): Promise<void> {
+    if (!draftId.trim()) throw new Error("deleteDraft: draftId is empty");
+    try {
+      await this.getGmail(mailbox).users.drafts.delete({ userId: "me", id: draftId });
+    } catch (err: any) {
+      const status = httpStatus(err);
+      const list = err?.response?.data?.error?.errors ?? err?.errors;
+      const reasons: unknown[] = Array.isArray(list) ? list.map((e: any) => e?.reason) : [];
+      // invalidArgument is Gmail's generic 400 reason; only its "Invalid id value" means the
+      // id isn't a draft id.
+      const badId = status === 400 && reasons.includes("invalidArgument") && /invalid\b.*\bid\b/i.test(String(err?.message ?? ""));
+      if (status === 404 || badId) {
+        // Keep the HTTP status on the error, as Microsoft's GraphError does.
+        throw Object.assign(
+          new Error(`deleteDraft: no draft ${draftId} in ${mailbox} — already sent or discarded, or not a draft id (pass DraftRef.draftId)`, { cause: err }),
+          { status },
+        );
+      }
+      throw err;
+    }
   }
 
   async markAsRead(mailbox: string, messageId: string, isRead: boolean) {
@@ -633,7 +765,7 @@ export class GoogleEmailProvider implements EmailProvider {
 
   async sendConversationMessage(p: ConversationMessageParams): Promise<{ messageId: string }> {
     const gmail = this.getGmail(p.mailbox);
-    const messageId = `<${randomUUID()}@${p.mailbox.split("@")[1] ?? "localhost"}>`;
+    const messageId = newMessageId(p.mailbox);
     const raw = buildMime({
       from: p.mailbox,
       to: p.to,
@@ -718,7 +850,7 @@ export class GoogleEmailProvider implements EmailProvider {
       return { id: created.data.id!, name: created.data.name!, totalCount: 0, unreadCount: 0, childCount: 0 };
     } catch (err: any) {
       // Lost a create race (409: label name exists).
-      if (err?.code === 409 || err?.status === 409) {
+      if (httpStatus(err) === 409) {
         const raced = await find();
         if (raced) return raced;
       }

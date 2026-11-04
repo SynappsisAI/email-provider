@@ -78,8 +78,11 @@ AgentFleet.
   is an internal wire-format detail of a provider. Don't leak it into `types.ts`.
 - **Keep it pure mechanics.** Auth, policy, transport, and rate-limiting-per-caller
   are out of scope by design — push back if a change would pull them in.
-- **A contract change (`types.ts` / `EmailProvider`) is a BREAKING release.** Bump
-  the major, flag it `BREAKING —` in the changelog, and coordinate with consumers.
+- **A contract change (`types.ts` / `EmailProvider`) is a BREAKING release.** Flag it
+  `BREAKING —` in the changelog and coordinate with consumers. While the library is 0.x,
+  bump the **minor** (SemVer for 0.x: `0.7.0 → 0.8.0`); from 1.0 on, bump the major.
+  This repo-specific rule overrides the shared Changelog block's "BREAKING forces a major
+  version bump" for 0.x releases (decided 2026-11-04).
 - Provider setup prerequisites (Google OAuth scopes, Microsoft app permissions) live
   in `README.md` — update there, not here.
 

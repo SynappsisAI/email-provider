@@ -148,15 +148,37 @@ export interface RetrievedAttachment {
  *  message is created. 1–200 printable ASCII characters, e.g. `agentfleet; kind=digest`. */
 type Origin = { origin?: string };
 
-export interface SendParams extends Origin {
+/** A new message saved as a draft (`createDraft`): `sendEmail`'s params, minus sending. */
+export interface DraftParams extends Origin {
   mailbox: string;
   to: string[];
   subject: string;
   body: string;
   cc?: string[];
   bcc?: string[];
-  saveToSent?: boolean;
   attachments?: Attachment[];
+}
+
+export interface SendParams extends DraftParams {
+  saveToSent?: boolean;
+}
+
+/** What `createDraft` / `createReplyDraft` / `createForwardDraft` return: enough to find
+ *  the draft again and to remove it. */
+export interface DraftRef {
+  /** Message id of the draft: `readMessage` / `getAttachment` take it. On Gmail it changes
+   *  whenever the draft is edited (Gmail replaces the message); `draftId` doesn't. */
+  id: string;
+  /** Pass to `deleteDraft`. Gmail: the draft id (drafts API, not a message id).
+   *  Microsoft: the message id, same as `id`. */
+  draftId: string;
+  /** The draft's `Message-ID` as created, with angle brackets; undefined if the provider
+   *  didn't report one. Not guaranteed to survive the owner editing or sending the draft
+   *  (Gmail replaces a draft's message on every edit), so don't use it alone to tell
+   *  whether the draft was sent. */
+  internetMessageId?: string;
+  /** See `MessageSummary.conversationId`. */
+  conversationId?: string;
 }
 
 /**
@@ -309,4 +331,21 @@ export interface EmailProvider {
   /** The folder named `name` (under `parentId` if given), created if missing. `hidden`
    *  applies only on creation (Microsoft `isHidden`; Gmail hides the label). */
   getOrCreateFolder(mailbox: string, name: string, opts?: { parentId?: string; hidden?: boolean }): Promise<Folder>;
+
+  // Drafts: built like the matching send (same recipients, threading, quoting,
+  // attachments), saved in the mailbox's Drafts and NEVER sent, on any path. No origin
+  // header unless the caller passes `origin`. On Microsoft a reply/forward draft is the
+  // createReply/createForward flow that replyToMessage/forwardMessage use with attachments
+  // or `origin`; their one-shot /reply and /forward can't produce a draft.
+
+  /** A new message saved as a draft (as `sendEmail` would build it). */
+  createDraft(params: DraftParams): Promise<DraftRef>;
+  /** A reply / reply-all saved as a draft (as `replyToMessage` would build it). */
+  createReplyDraft(params: ReplyParams): Promise<DraftRef>;
+  /** A forward saved as a draft (as `forwardMessage` would build it). */
+  createForwardDraft(params: ForwardParams): Promise<DraftRef>;
+  /** Delete a draft by `DraftRef.draftId`. Throws, deleting nothing, when the target is
+   *  not a draft, so it can't remove a received or sent message. Gmail deletes it
+   *  permanently; Microsoft moves it to Deleted Items (recoverable). */
+  deleteDraft(mailbox: string, draftId: string): Promise<void>;
 }

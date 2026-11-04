@@ -19,7 +19,9 @@ function provider(handlers: Record<string, (args: any) => any> = {}, originHeade
         send: api("messages.send"),
         modify: api("messages.modify"),
         trash: api("messages.trash"),
+        attachments: { get: api("messages.attachments.get") },
       },
+      drafts: { create: api("drafts.create"), delete: api("drafts.delete"), send: api("drafts.send") },
       labels: { list: api("labels.list"), get: api("labels.get"), create: api("labels.create") },
     },
   };
@@ -200,4 +202,252 @@ test("getOrCreateFolder: existing label (case-insensitive) or a new hidden neste
   assert.deepEqual(fresh.calls.find((c) => c.api === "labels.create")!.args.requestBody, {
     name: "Parent/Hidden", labelListVisibility: "labelHide", messageListVisibility: "hide",
   });
+});
+
+// ── Drafts ──
+
+const SENDS = ["messages.send", "drafts.send"];
+const draftMime = (calls: Call[]) =>
+  Buffer.from(calls.find((c) => c.api === "drafts.create")!.args.requestBody.message.raw, "base64url").toString();
+/** Header block of a MIME string, unfolded into "Name: value" lines. */
+const headerOf = (mime: string, name: string) =>
+  mime.split("\r\n\r\n")[0].split("\r\n").find((l) => l.toLowerCase().startsWith(`${name.toLowerCase()}:`))?.slice(name.length + 1).trim();
+
+/** Gmail fake for drafts: `original` answers gets of message "o"; the draft is "dm1" / "r-1". */
+function draftProvider(original: gmail_message = { threadId: "t1", payload: { headers: [] } }, extra: Record<string, (a: any) => any> = {}) {
+  return provider({
+    "messages.get": (a) =>
+      a.id === "dm1" ? { id: "dm1", payload: { headers: H(["Message-ID", "<kept@example.com>"]) } } : original,
+    "drafts.create": () => ({ id: "r-1", message: { id: "dm1", threadId: "t1" } }),
+    ...extra,
+  });
+}
+type gmail_message = Record<string, any>;
+
+test("createDraft: sendEmail's MIME saved via drafts.create, never sent; returns the draft's ids", async () => {
+  const { p, calls } = draftProvider();
+  const ref = await p.createDraft({
+    mailbox: "ana@example.com",
+    to: ["bob@example.com"],
+    cc: ["carol@example.com"],
+    bcc: ["dave@example.com"],
+    subject: "Propuesta",
+    body: '<p>Hola</p><img src="cid:logo">',
+    attachments: [
+      { filename: "logo.png", contentType: "image/png", content: Buffer.from("png"), contentId: "logo" },
+      { filename: "a.pdf", contentType: "application/pdf", content: Buffer.from("pdf") },
+    ],
+  });
+  const mime = draftMime(calls);
+  assert.deepEqual(ref, { id: "dm1", draftId: "r-1", internetMessageId: headerOf(mime, "Message-ID"), conversationId: "t1" });
+  assert.deepEqual(calls.map((c) => c.api), ["drafts.create"], "one call: no send, no read-back");
+  assert.equal(headerOf(mime, "From"), "ana@example.com");
+  assert.equal(headerOf(mime, "To"), "bob@example.com");
+  assert.equal(headerOf(mime, "Cc"), "carol@example.com");
+  assert.equal(headerOf(mime, "Bcc"), "dave@example.com");
+  assert.match(headerOf(mime, "Message-ID")!, /^<[0-9a-f-]{36}@example\.com>$/);
+  assert.match(mime, /Content-ID: <logo>/);
+  assert.match(mime, /filename="a\.pdf"/);
+});
+
+test("createDraft: no origin header unless the caller passes one", async () => {
+  const { p, calls } = provider({ "drafts.create": () => ({ id: "r-1", message: { id: "dm1" } }) }, "X-AgentFleet-Origin");
+  await p.createDraft({ mailbox: "a@example.com", to: ["b@example.com"], subject: "s", body: "b" });
+  assert.equal(headerOf(draftMime(calls), "X-AgentFleet-Origin"), undefined);
+});
+
+
+const original = (...headers: [string, string][]) => ({
+  threadId: "t1",
+  payload: { headers: H(["Subject", "Pedido"], ["Message-ID", "<o1@example.com>"], ["References", "<o0@example.com>"], ...headers) },
+});
+
+test("createReplyDraft: goes to Reply-To when present, threaded, never sent", async () => {
+  const { p, calls } = draftProvider(original(["From", "Bob <bob@example.com>"], ["Reply-To", "Soporte <help@example.com>"]));
+  const ref = await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "<p>ok</p>" });
+  assert.equal(ref.draftId, "r-1");
+  assert.ok(!calls.some((c) => SENDS.includes(c.api)));
+  const create = calls.find((c) => c.api === "drafts.create")!;
+  assert.equal(create.args.requestBody.message.threadId, "t1");
+  const mime = draftMime(calls);
+  assert.equal(headerOf(mime, "To"), "help@example.com");
+  assert.equal(headerOf(mime, "Cc"), undefined);
+  assert.equal(headerOf(mime, "Subject"), "Re: Pedido");
+  assert.equal(headerOf(mime, "In-Reply-To"), "<o1@example.com>");
+  assert.equal(headerOf(mime, "References"), "<o0@example.com> <o1@example.com>");
+});
+
+test("createReplyDraft: goes to From without Reply-To", async () => {
+  const { p, calls } = draftProvider(original(["From", "Bob <bob@example.com>"], ["To", "ana@example.com"]));
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" });
+  assert.equal(headerOf(draftMime(calls), "To"), "bob@example.com");
+});
+
+test("createReplyDraft replyAll: sender + original To, original Cc, minus the mailbox itself", async () => {
+  const { p, calls } = draftProvider(
+    original(
+      ["From", "bob@example.com"],
+      ["To", "Ana <ana@example.com>, carol@example.com"],
+      ["Cc", "dave@example.com, ANA@example.com"],
+    ),
+  );
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x", replyAll: true });
+  const mime = draftMime(calls);
+  assert.equal(headerOf(mime, "To"), "bob@example.com, carol@example.com");
+  assert.equal(headerOf(mime, "Cc"), "dave@example.com");
+});
+
+test("createForwardDraft: given recipients, comment above the original, original attachments carried, never sent", async () => {
+  const { p, calls } = draftProvider(
+    {
+      threadId: "t1",
+      payload: {
+        mimeType: "multipart/mixed",
+        headers: H(["Subject", "Factura"], ["From", "bob@example.com"]),
+        parts: [
+          { mimeType: "text/html", body: { data: Buffer.from("<p>original</p>").toString("base64url") } },
+          { mimeType: "application/pdf", filename: "f.pdf", body: { attachmentId: "att1", size: 3 } },
+        ],
+      },
+    },
+    { "messages.attachments.get": () => ({ data: Buffer.from("pdf").toString("base64url"), size: 3 }) },
+  );
+  await p.createForwardDraft({ mailbox: "ana@example.com", messageId: "o", to: ["eve@example.com"], comment: "<p>FYI</p>" });
+  assert.ok(!calls.some((c) => SENDS.includes(c.api)));
+  const mime = draftMime(calls);
+  assert.equal(headerOf(mime, "To"), "eve@example.com");
+  assert.equal(headerOf(mime, "Subject"), "Fwd: Factura");
+  assert.match(mime, /filename="f\.pdf"/);
+  const html = Buffer.from(mime.match(/text\/html; charset="UTF-8"\r\nContent-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+)/)![1], "base64").toString();
+  assert.ok(html.indexOf("FYI") < html.indexOf("Forwarded message") && html.indexOf("Forwarded message") < html.indexOf("original"));
+});
+
+test("draft creation failing never falls back to sending", async () => {
+  const { p, calls } = draftProvider(original(["From", "bob@example.com"]), {
+    "drafts.create": () => {
+      throw Object.assign(new Error("quota"), { code: 429 });
+    },
+  });
+  await assert.rejects(p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" }), /quota/);
+  await assert.rejects(p.createDraft({ mailbox: "ana@example.com", to: ["b@example.com"], subject: "s", body: "b" }), /quota/);
+  assert.ok(!calls.some((c) => SENDS.includes(c.api)));
+});
+
+test("deleteDraft: deletes through the drafts API only", async () => {
+  const { p, calls } = provider();
+  await p.deleteDraft("ana@example.com", "r-1");
+  assert.deepEqual(calls.map((c) => [c.api, c.args.id]), [["drafts.delete", "r-1"]]);
+});
+
+test("deleteDraft: an id that isn't a draft (404, or 400 invalidArgument) is refused", async () => {
+  for (const err of [
+    { status: 404, code: "ERR_BAD_REQUEST" }, // gaxios 7 shape: numeric status, string code
+    { code: 404 },
+    { message: "Invalid draft id", status: 400, response: { status: 400, data: { error: { errors: [{ reason: "invalidArgument", message: "Invalid id value" }] } } } },
+  ]) {
+    const { p, calls } = provider({
+      "drafts.delete": () => {
+        throw Object.assign(new Error("nope"), err);
+      },
+    });
+    await assert.rejects(p.deleteDraft("ana@example.com", "18c0ffee"), (e: any) => /not a draft/.test(e.message) && typeof e.status === "number");
+    assert.ok(!calls.some((c) => c.api.startsWith("messages.")));
+  }
+});
+
+test("deleteDraft: other errors propagate untranslated", async () => {
+  const { p } = provider({
+    "drafts.delete": () => {
+      throw Object.assign(new Error("Backend Error"), { code: 500 });
+    },
+  });
+  await assert.rejects(p.deleteDraft("ana@example.com", "r-1"), /Backend Error/);
+});
+
+test("deleteDraft: a 400 that isn't about the id (auth/delegation) propagates as is", async () => {
+  const { p } = provider({
+    "drafts.delete": () => {
+      throw Object.assign(new Error("invalid_grant"), { status: 400, response: { data: { error: "invalid_grant" } } });
+    },
+  });
+  await assert.rejects(p.deleteDraft("ana@example.com", "r-1"), /invalid_grant/);
+});
+
+test("createDraft: a create response without a message id deletes the draft it made, then throws", async () => {
+  const { p, calls } = provider({ "drafts.create": () => ({ id: "r-9" }) });
+  await assert.rejects(p.createDraft({ mailbox: "a@example.com", to: ["b@example.com"], subject: "s", body: "b" }), /no draft or message id/);
+  assert.deepEqual(calls.filter((c) => c.api === "drafts.delete").map((c) => c.args.id), ["r-9"]);
+});
+
+test("replies/forwards don't stack prefixes on Outlook-style \"RE:\" / \"FW:\" subjects", async () => {
+  const { p, calls } = draftProvider({ threadId: "t1", payload: { headers: H(["From", "bob@example.com"], ["Subject", "RE: Cotización"]) } });
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" });
+  assert.equal(headerOf(draftMime(calls), "Subject"), "=?UTF-8?B?" + Buffer.from("RE: Cotización").toString("base64") + "?=");
+  const fw = draftProvider({ threadId: "t1", payload: { mimeType: "text/html", headers: H(["Subject", "FW: x"]), body: { data: "" } } });
+  await fw.p.createForwardDraft({ mailbox: "ana@example.com", messageId: "o", to: ["e@example.com"] });
+  assert.equal(headerOf(draftMime(fw.calls), "Subject"), "FW: x");
+});
+
+test("replyAll: an address in Reply-To and To/Cc appears once; To wins over Cc", async () => {
+  const { p, calls } = draftProvider(
+    original(["From", "bob@example.com"], ["Reply-To", "team@example.com"], ["To", "TEAM@example.com, ana@example.com, carol@example.com"], ["Cc", "carol@example.com, dave@example.com"]),
+  );
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x", replyAll: true });
+  const mime = draftMime(calls);
+  assert.equal(headerOf(mime, "To"), "team@example.com, carol@example.com");
+  assert.equal(headerOf(mime, "Cc"), "dave@example.com");
+});
+
+test("a reply with no usable recipient is refused before any draft is created", async () => {
+  const { p, calls } = draftProvider(original(["From", ""]));
+  await assert.rejects(p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" }), /no recipient/);
+  assert.ok(!calls.some((c) => c.api === "drafts.create" || SENDS.includes(c.api)));
+});
+
+test("a plain reply to the mailbox's own sent message goes back to the mailbox (as before)", async () => {
+  const { p, calls } = draftProvider(original(["From", "Ana <ana@example.com>"], ["To", "bob@example.com"]));
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" });
+  assert.equal(headerOf(draftMime(calls), "To"), "ana@example.com");
+});
+
+test("reply-all with only Cc left (own message to self) still goes out to the Cc", async () => {
+  const { p, calls } = draftProvider(original(["From", "ana@example.com"], ["To", "ana@example.com"], ["Cc", "a@example.com, b@example.com"]));
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x", replyAll: true });
+  const mime = draftMime(calls);
+  assert.equal(headerOf(mime, "To"), "a@example.com, b@example.com", "Cc promoted to To, no empty To header");
+  assert.equal(headerOf(mime, "Cc"), undefined);
+});
+
+test("deleteDraft: a non-array `errors` on the error doesn't mask the real error", async () => {
+  const { p } = provider({
+    "drafts.delete": () => {
+      throw Object.assign(new Error("Backend Error"), { status: 400, errors: { weird: true } });
+    },
+  });
+  await assert.rejects(p.deleteDraft("ana@example.com", "r-1"), /Backend Error/);
+});
+
+test("non-addresses (MAILER-DAEMON, undisclosed-recipients) are not recipients", async () => {
+  const bad = draftProvider(original(["From", "MAILER-DAEMON"]));
+  await assert.rejects(bad.p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" }), /no recipient/);
+  const all = draftProvider(original(["From", "bob@example.com"], ["To", "undisclosed-recipients:;"]));
+  await all.p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x", replyAll: true });
+  assert.equal(headerOf(draftMime(all.calls), "To"), "bob@example.com");
+});
+
+test("deleteDraft: another invalidArgument 400 isn't reported as 'no draft'; empty id refused up front", async () => {
+  const { p, calls } = provider({
+    "drafts.delete": () => {
+      throw Object.assign(new Error("Precondition check failed."), { status: 400, errors: [{ reason: "invalidArgument" }] });
+    },
+  });
+  await assert.rejects(p.deleteDraft("ana@example.com", "r-1"), /^Error: Precondition check failed\.$/);
+  await assert.rejects(p.deleteDraft("ana@example.com", "  "), /draftId is empty/);
+  assert.equal(calls.length, 1);
+});
+
+test("a Reply-To with no usable address falls back to From", async () => {
+  const { p, calls } = draftProvider(original(["From", "bob@example.com"], ["Reply-To", "list-name"]));
+  await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" });
+  assert.equal(headerOf(draftMime(calls), "To"), "bob@example.com");
 });

@@ -21,8 +21,10 @@ export type {
   ListResult,
   Attachment,
   RetrievedAttachment,
+  DraftRef,
   // Operation params
   SendParams,
+  DraftParams,
   ConversationMessageParams,
   ListParams,
   ListSinceParams,

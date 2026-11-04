@@ -6,6 +6,7 @@ Provider-agnostic email library for Synappsis services. Wraps Google Workspace
 This is a **pure mechanics** library:
 
 - ✅ Send, list, read, search, reply, forward, get attachments, mark read, list folders
+- ✅ Drafts: create (new / reply / reply-all / forward) without sending, delete
 - ✅ Per-mailbox impersonation via Google domain-wide delegation
 - ✅ Tenant-wide app permissions via Microsoft Graph
 - ✅ MIME construction with attachments
@@ -116,6 +117,10 @@ interface EmailProvider {
   findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]>;
   moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }>;
   getOrCreateFolder(mailbox: string, name: string, opts?: { parentId?: string; hidden?: boolean }): Promise<Folder>;
+  createDraft(params: DraftParams): Promise<DraftRef>;
+  createReplyDraft(params: ReplyParams): Promise<DraftRef>;
+  createForwardDraft(params: ForwardParams): Promise<DraftRef>;
+  deleteDraft(mailbox: string, draftId: string): Promise<void>;
 }
 ```
 
@@ -156,7 +161,8 @@ Microsoft this switches to Graph's draft flow (`createReply`/`createForward` →
 add attachments → send) since the one-shot `/reply` and `/forward` only take a `comment`.
 Each attachment on that path is a single Graph upload, so it must be **< 3MB** (fine for a
 signature logo; larger files would need an upload session, not implemented). Reply drafts
-also get the original's inline images copied in, so the quoted part renders. On Gmail, a
+also get the original's inline images copied in, so the quoted part renders. If the final
+`/send` fails, the draft is deleted so no orphan is left behind. On Gmail, a
 forward carries the original's attachments while the encoded message fits in ~24MB; above
 that it goes out body-only (the pre-0.4.0 behavior). `MessageFull.replyTo` exposes the `Reply-To` header —
 where a native reply is actually delivered (both providers reply to Reply-To when set,
@@ -263,6 +269,47 @@ that, see `internalSender`.
 hides the label, and `parentId` nests it as `Parent/Name`. `moveMessage` on Gmail adds the
 destination label and removes `INBOX`/`SPAM`/`TRASH`.
 
+### Drafts
+
+Leave a message in a mailbox's Drafts for its owner to review and send themselves:
+
+```ts
+const ref = await provider.createReplyDraft({ mailbox, messageId, body: "<p>Propuesta…</p>", replyAll: true });
+// ref = { id, draftId, internetMessageId?, conversationId? }
+const check = await provider.readMessage(mailbox, ref.id);   // to / cc / bcc / replyTo as saved
+await provider.deleteDraft(mailbox, ref.draftId);             // e.g. to replace it
+```
+
+- `createDraft` takes `sendEmail`'s params (minus `saveToSent`), `createReplyDraft` takes
+  `replyToMessage`'s and `createForwardDraft` takes `forwardMessage`'s. Each draft is built
+  as that send would build it: the same recipients (a reply goes to the original's
+  `Reply-To` when set, else its `From`; reply-all adds the original's To/Cc minus the
+  mailbox), threading, quoting and attachments. On Gmail a reply doesn't quote the
+  original, the same as `replyToMessage`.
+- They **never send**, on any path. Nothing in them calls a send endpoint. On Microsoft
+  a failure after the draft exists tries to delete it, so it isn't left half-built; if
+  that delete also fails, the draft can remain.
+- No origin header is added unless you pass `origin`.
+- `DraftRef.id` is the draft's message id (for `readMessage`). `draftId` is what
+  `deleteDraft` takes: on Gmail the drafts-API id, which stays put when the draft is edited
+  (the message id doesn't); on Microsoft the message id again. Always pass `draftId`:
+  `id` happens to work on Microsoft but is refused on Gmail. `internetMessageId` is the
+  draft's `Message-ID` as created: on Gmail one we generate (always set), on Microsoft
+  Graph's (undefined if Graph didn't report one). It isn't guaranteed to survive the owner
+  editing or sending the draft (Gmail replaces a draft's message on every edit), so don't
+  rely on it alone to tell whether a draft was sent.
+- `deleteDraft` only deletes drafts. Microsoft checks `isDraft` first and throws on
+  anything else, then deletes with `If-Match` on the etag it just read, so a draft sent
+  in between (same id under `immutableIds`) gets a 412 and is not deleted. Gmail goes
+  through `drafts.delete`, which only knows draft ids, so a message id is refused. Gmail deletes the draft permanently. Microsoft's
+  `DELETE` moves it to Deleted Items.
+- Microsoft: a new-message draft is `POST /messages` (attachments ride in the same request,
+  as in `sendEmail`). Reply/forward drafts are `createReply`/`createReplyAll`/
+  `createForward` + body patch + attachments, the flow described above minus the `/send`,
+  so each added attachment must be < 3MB. (Without attachments or `origin`,
+  `replyToMessage`/`forwardMessage` use Graph's one-shot `/reply`/`/forward`, where Graph
+  places the comment above the quote itself; the result is equivalent, not byte-identical.)
+
 ### Internal senders (Microsoft 365)
 
 `From` is unauthenticated and spoofable, and DKIM/DMARC can't tell internal mail apart
@@ -306,6 +353,9 @@ following OAuth scopes authorized in the Google Workspace admin console:
 - `https://www.googleapis.com/auth/gmail.modify`
 - `https://www.googleapis.com/auth/gmail.send`
 
+`gmail.modify` also covers the drafts API (`drafts.create` / `drafts.delete`), so drafts
+need no extra scope. (`gmail.compose` would cover it too, but isn't needed with `modify`.)
+
 Pass the parsed key JSON via `serviceAccountKey`.
 
 ### Microsoft 365
@@ -314,7 +364,7 @@ Requires an Azure AD app registration with **application** (not delegated)
 permissions:
 
 - `Mail.Send`
-- `Mail.ReadWrite`
+- `Mail.ReadWrite` (also what creating and deleting drafts needs)
 
 Grant admin consent, then pass `clientId`, `clientSecret`, and `tenantId`.
 

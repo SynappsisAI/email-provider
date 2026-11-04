@@ -6,6 +6,42 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-04
+
+### Added
+
+- **Borradores sin enviar en Gmail y Microsoft 365: `createDraft`, `createReplyDraft`,
+  `createForwardDraft` y `deleteDraft`.** Un asistente puede dejar en el buzón de una persona
+  un mensaje, respuesta, respuesta a todos o reenvío, armado igual que el envío equivalente
+  pero sin enviarlo nunca, para que ella lo revise y lo envíe; `deleteDraft` solo borra
+  borradores (en Microsoft verifica `isDraft` y borra condicionado al etag). No requiere
+  permisos nuevos (`gmail.modify` / `Mail.ReadWrite`); cierra #10 y AgentFleet debe bumpear
+  el pin a `v0.8.0`.
+
+### Changed
+
+- **BREAKING — `EmailProvider` agrega los métodos `createDraft`, `createReplyDraft`,
+  `createForwardDraft` y `deleteDraft`.** Quien implemente la interfaz (mocks en tests)
+  tiene que agregarlos; a quien solo consume la librería no le cambia nada.
+
+### Fixed
+
+- **Gmail: "Re:"/"Fwd:" se detectan sin distinguir mayúsculas.** Responder a un asunto
+  "RE: …" (Outlook) ya no produce "Re: RE: …".
+- **Gmail: los destinatarios de un reply salen limpios.** Cada dirección va una sola vez,
+  se descartan entradas sin dirección (`MAILER-DAEMON`, `undisclosed-recipients:;`) y un
+  reply sin ningún destinatario usable falla con un error claro en vez de enviarse o
+  guardarse sin destinatarios.
+
+### Security
+
+- **Microsoft: un id armado ya no puede salir del buzón autorizado.** Los ids y el buzón se
+  insertan en la ruta de Graph, y un id con segmentos `..` podía apuntar a otro buzón del
+  tenant, saltándose el whitelist por buzón de quien consume la librería (synmail). Ahora
+  cada id y buzón se codifica como un único segmento de ruta en todos los métodos del
+  provider de Microsoft (Gmail no estaba expuesto); un buzón ya codificado (`user%40…`) o con un
+  salto de línea suelto deja de funcionar, así que hay que pasarlo crudo.
+
 ## [0.7.0] — 2026-10-13
 
 ### Added

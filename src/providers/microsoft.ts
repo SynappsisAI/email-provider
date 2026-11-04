@@ -1,11 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { ConfidentialClientApplication } from "@azure/msal-node";
-import { buildMimeMessage } from "../mime.js";
+import { buildMimeMessage, newMessageId } from "../mime.js";
 import { decodeCursor, encodeCursor, nextCursor, pageSizeOf, parseSince } from "../cursor.js";
 import { assertOriginHeaderName, classifyKind, originHeaderPair, readOrigin } from "../headers.js";
 import type {
   Attachment,
   ConversationMessageParams,
+  DraftParams,
+  DraftRef,
   EmailProvider,
   EmailAddress,
   MessageSummary,
@@ -36,9 +37,28 @@ const MESSAGE_CLASS_PROP = "String 0x001A";
 /** OData string literal: single quotes doubled. */
 const odataString = (v: string) => `'${v.replace(/'/g, "''")}'`;
 
+/**
+ * One caller-supplied value (mailbox, message/attachment/folder id) as a single Graph path
+ * segment: URL-encoded so it can't add segments, `?`/`#` or dot-segments — a crafted id such
+ * as `../../other@x/messages/<id>` can't leave the mailbox the consumer authorized. `@` and `=`
+ * stay literal (valid in a path segment, and what real mailboxes and Graph ids contain), so
+ * ordinary paths are byte-for-byte what they were. Exported for tests; not public API.
+ */
+export function encodeSegment(value: string): string {
+  if (typeof value !== "string" || value === "" || value === "." || value === "..") {
+    throw new Error(`Invalid mailbox or id for a Graph path: ${JSON.stringify(value)}`);
+  }
+  return encodeURIComponent(value).replace(/%40/g, "@").replace(/%3D/g, "=");
+}
+
+/** Tagged template for Graph paths: every `${value}` goes through `encodeSegment`. */
+export function gpath(strings: TemplateStringsArray, ...values: string[]): string {
+  return strings.reduce((out, part, i) => out + encodeSegment(values[i - 1]) + part);
+}
+
 class GraphError extends Error {
-  constructor(readonly status: number, readonly code: string | undefined, message: string) {
-    super(message);
+  constructor(readonly status: number, readonly code: string | undefined, message: string, options?: ErrorOptions) {
+    super(message, options);
   }
 }
 
@@ -132,6 +152,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
       rawBody?: string;
       contentType?: string;
       params?: Record<string, string>;
+      /** Extra request headers, e.g. `If-Match`. */
+      headers?: Record<string, string>;
     } = {}
   ) {
     const token = await this.getToken();
@@ -145,6 +167,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
       "Content-Type": opts.contentType ?? "application/json",
     };
     if (this.immutableIds) headers.Prefer = 'IdType="ImmutableId"';
+    Object.assign(headers, opts.headers);
 
     const res = await fetch(url.toString(), {
       method: opts.method ?? "GET",
@@ -255,7 +278,18 @@ export class MicrosoftEmailProvider implements EmailProvider {
     return pairs.length ? { internetMessageHeaders: pairs.map(([name, value]) => ({ name, value })) } : {};
   }
 
-  async sendEmail({ mailbox, to, subject, body, cc, bcc, saveToSent, attachments, origin }: SendParams) {
+  async sendEmail(params: SendParams) {
+    const { mailbox, saveToSent } = params;
+    await this.graph(gpath`/users/${mailbox}/sendMail`, {
+      method: "POST",
+      body: { message: this.newMessage(params), saveToSentItems: saveToSent ?? true },
+    });
+
+    return { from: mailbox };
+  }
+
+  /** Graph message JSON for a new message — shared by `sendEmail` and `createDraft`. */
+  private newMessage({ to, subject, body, cc, bcc, attachments, origin }: DraftParams): Record<string, unknown> {
     const message: Record<string, unknown> = {
       subject,
       body: { contentType: "HTML", content: body },
@@ -275,13 +309,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
         ...(att.contentId ? { isInline: true, contentId: att.contentId } : {}),
       }));
     }
-
-    await this.graph(`/users/${mailbox}/sendMail`, {
-      method: "POST",
-      body: { message, saveToSentItems: saveToSent ?? true },
-    });
-
-    return { from: mailbox };
+    return message;
   }
 
   async listMessages({ mailbox, folder, limit, offset, unreadOnly }: ListParams): Promise<ListResult> {
@@ -298,7 +326,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
     };
     if (unreadOnly) params.$filter = "isRead eq false";
 
-    const r = await this.graph(`/users/${mailbox}/mailFolders/${folderName}/messages`, { params });
+    const r = await this.graph(gpath`/users/${mailbox}/mailFolders/${folderName}/messages`, { params });
     return {
       messages: (r.value as any[]).map(MicrosoftEmailProvider.toSummary),
       totalCount: r["@odata.count"] ?? r.value.length,
@@ -322,7 +350,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
     const folderName = MicrosoftEmailProvider.toFolderId(folder ?? "inbox");
     let filter = `receivedDateTime ge ${new Date(fromMs).toISOString()}`;
     if (unreadOnly) filter += " and isRead eq false";
-    const r = await this.graph(`/users/${mailbox}/mailFolders/${folderName}/messages`, {
+    const r = await this.graph(gpath`/users/${mailbox}/mailFolders/${folderName}/messages`, {
       // Graph requires $orderby properties to lead the $filter, in the same order.
       params: { $filter: filter, $orderby: "receivedDateTime asc", $top: String(top), $select: SUMMARY_SELECT },
     });
@@ -339,14 +367,14 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   async readMessage(mailbox: string, messageId: string): Promise<MessageFull> {
     const [r, attRes] = await Promise.all([
-      this.graph(`/users/${mailbox}/messages/${messageId}`, {
+      this.graph(gpath`/users/${mailbox}/messages/${messageId}`, {
         params: {
           $select:
             "id,subject,from,sender,toRecipients,ccRecipients,bccRecipients,replyTo,internetMessageHeaders,conversationId,internetMessageId,parentFolderId,uniqueBody,receivedDateTime,isRead,body,hasAttachments",
           $expand: `singleValueExtendedProperties($filter=id eq ${odataString(MESSAGE_CLASS_PROP)})`,
         },
       }),
-      this.graph(`/users/${mailbox}/messages/${messageId}/attachments`, {
+      this.graph(gpath`/users/${mailbox}/messages/${messageId}/attachments`, {
         params: { $select: "id,name,contentType,size" },
       }).catch(() => ({ value: [] })),
     ]);
@@ -367,7 +395,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
     attachmentId: string,
   ): Promise<RetrievedAttachment> {
     const r = await this.graph(
-      `/users/${mailbox}/messages/${messageId}/attachments/${attachmentId}`
+      gpath`/users/${mailbox}/messages/${messageId}/attachments/${attachmentId}`
     );
     // Graph returns the file content as base64 in `contentBytes`. Decode to Buffer.
     const content = Buffer.from(r.contentBytes ?? "", "base64");
@@ -390,8 +418,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
     if (offset && offset > 0) params.$skip = String(offset);
 
     const basePath = folder
-      ? `/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(folder)}/messages`
-      : `/users/${mailbox}/messages`;
+      ? gpath`/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(folder)}/messages`
+      : gpath`/users/${mailbox}/messages`;
 
     const r = await this.graph(basePath, { params });
     return {
@@ -402,24 +430,26 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   // An origin header can only be set when the message is created, and only the
   // create* (draft) actions were verified to take it — so origin routes via the draft.
-  async replyToMessage({ mailbox, messageId, body, replyAll, attachments, origin }: ReplyParams) {
+  async replyToMessage(params: ReplyParams) {
+    const { mailbox, messageId, body, replyAll, attachments, origin } = params;
     if (attachments?.length || origin !== undefined) {
-      await this.sendViaDraft(mailbox, messageId, replyAll ? "createReplyAll" : "createReply", body, attachments ?? [], undefined, origin);
+      await this.sendDraft(mailbox, (await this.composeReplyDraft(params)).id);
       return;
     }
     const action = replyAll ? "replyAll" : "reply";
-    await this.graph(`/users/${mailbox}/messages/${messageId}/${action}`, {
+    await this.graph(gpath`/users/${mailbox}/messages/${messageId}/${action}`, {
       method: "POST",
       body: { comment: body },
     });
   }
 
-  async forwardMessage({ mailbox, messageId, to, comment, attachments, origin }: ForwardParams) {
+  async forwardMessage(params: ForwardParams) {
+    const { mailbox, messageId, to, comment, attachments, origin } = params;
     if (attachments?.length || origin !== undefined) {
-      await this.sendViaDraft(mailbox, messageId, "createForward", comment ?? "", attachments ?? [], to, origin);
+      await this.sendDraft(mailbox, (await this.composeForwardDraft(params)).id);
       return;
     }
-    await this.graph(`/users/${mailbox}/messages/${messageId}/forward`, {
+    await this.graph(gpath`/users/${mailbox}/messages/${messageId}/forward`, {
       method: "POST",
       body: {
         comment: comment ?? "",
@@ -439,7 +469,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
   private async originalInlineAttachments(mailbox: string, messageId: string, draftPath: string): Promise<Attachment[]> {
     try {
       // Metadata only (a full list would pull every attachment's bytes, PDFs included).
-      const base = `/users/${mailbox}/messages/${messageId}/attachments`;
+      const base = gpath`/users/${mailbox}/messages/${messageId}/attachments`;
       const [list, onDraft] = await Promise.all([
         this.graph(base, { params: { $select: "id,isInline,size" } }),
         this.graph(`${draftPath}/attachments`, { params: { $select: "id,isInline" } }),
@@ -451,10 +481,10 @@ export class MicrosoftEmailProvider implements EmailProvider {
       // If Graph already copied the inline images into the draft, don't add them twice.
       const draftInlineIds = ((onDraft?.value ?? []) as any[]).filter((a) => a.isInline).map((a) => a.id as string);
       const draftCids = new Set(
-        (await Promise.all(draftInlineIds.map((id) => this.graph(`${draftPath}/attachments/${id}`))))
+        (await Promise.all(draftInlineIds.map((id) => this.graph(`${draftPath}/attachments/${encodeSegment(id)}`))))
           .map((a: any) => String(a?.contentId ?? "").replace(/^<|>$/g, "")),
       );
-      const full = await Promise.all(inlineIds.map((id) => this.graph(`${base}/${id}`)));
+      const full = await Promise.all(inlineIds.map((id) => this.graph(`${base}/${encodeSegment(id)}`)));
       return full
         .filter((a: any) => a?.contentId && a.contentBytes && a["@odata.type"] === "#microsoft.graph.fileAttachment")
         .map((a: any) => ({
@@ -484,26 +514,60 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   /**
    * Reply/forward carrying attachments. The one-shot `/reply` and `/forward` actions only
-   * take a `comment` string, so inline images can't ride on them. Instead: create the
-   * draft (Graph fills threading, quoted original and — on forward — the original's
-   * attachments), prepend our HTML to its body, add the attachments, send. A failure
-   * after the draft exists deletes it so no orphan draft is left behind.
+   * take a `comment` string, so inline images can't ride on them. Instead the send path
+   * builds the same draft `createReplyDraft`/`createForwardDraft` save (one mapping each,
+   * below), then sends it. A failed send deletes the draft so no orphan is left behind
+   * (the v0.7 behavior). Known hazard, tracked in #12: with `immutableIds`, if /send
+   * errors after Exchange already accepted it (timeout, 5xx), that DELETE can bin the
+   * message on its way out.
    */
-  private async sendViaDraft(
-    mailbox: string,
-    messageId: string,
-    action: "createReply" | "createReplyAll" | "createForward",
-    html: string,
-    attachments: Attachment[],
-    to?: string[],
-    origin?: string,
-  ) {
+  private async sendDraft(mailbox: string, draftId: string) {
+    const draftPath = gpath`/users/${mailbox}/messages/${draftId}`;
+    try {
+      await this.graph(`${draftPath}/send`, { method: "POST" });
+    } catch (err) {
+      await this.graph(draftPath, { method: "DELETE" }).catch(() => {});
+      throw err;
+    }
+  }
+
+  private composeReplyDraft({ mailbox, messageId, body, replyAll, attachments, origin }: ReplyParams) {
+    return this.composeDraft({
+      mailbox, messageId, action: replyAll ? "createReplyAll" : "createReply", html: body, attachments: attachments ?? [], origin,
+    });
+  }
+
+  private composeForwardDraft({ mailbox, messageId, to, comment, attachments, origin }: ForwardParams) {
+    return this.composeDraft({
+      mailbox, messageId, action: "createForward", html: comment ?? "", attachments: attachments ?? [], to, origin,
+    });
+  }
+
+  /**
+   * Create a reply/reply-all/forward draft (Graph fills recipients — Reply-To when set,
+   * else From; reply-all adds To/Cc — threading, the quoted original and, on forward, the
+   * original's attachments), prepend our HTML to its body, set forward recipients, add
+   * the attachments. Never sends. A failure after the draft exists deletes it (it was never
+   * sent). Returns the `create*` response overlaid with the PATCH response.
+   */
+  private async composeDraft({ mailbox, messageId, action, html, attachments, to, origin }: {
+    mailbox: string;
+    messageId: string;
+    action: "createReply" | "createReplyAll" | "createForward";
+    html: string;
+    attachments: Attachment[];
+    /** Forward recipients. */
+    to?: string[];
+    origin?: string;
+  }): Promise<any> {
     const headers = this.originHeaders(origin);
-    const draft = await this.graph(`/users/${mailbox}/messages/${messageId}/${action}`, {
+    const draft = await this.graph(gpath`/users/${mailbox}/messages/${messageId}/${action}`, {
       method: "POST",
       body: "internetMessageHeaders" in headers ? { message: headers } : {},
     });
-    const draftPath = `/users/${mailbox}/messages/${draft.id}`;
+    // Nothing to clean up without an id; say so rather than blame the caller's input.
+    if (typeof draft?.id !== "string" || !draft.id) throw new Error(`Graph returned no id for the ${action} draft`);
+    const draftPath = gpath`/users/${mailbox}/messages/${draft.id}`;
     try {
       // The draft's quoted body follows the mailbox's compose format — normalize a
       // plain-text one to HTML so its line breaks survive under contentType HTML.
@@ -518,7 +582,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
         : `${html}${quoted}`;
       const patch: Record<string, unknown> = { body: { contentType: "HTML", content } };
       if (to) patch.toRecipients = to.map((a) => ({ emailAddress: { address: a } }));
-      await this.graph(draftPath, { method: "PATCH", body: patch });
+      // PATCH returns the updated message (may carry internetMessageId the create lacked).
+      const patched = await this.graph(draftPath, { method: "PATCH", body: patch });
       // createReply(All) drafts quote the original's HTML (incl. its cid: images) but don't
       // carry its inline attachments — copy them so the quote doesn't render broken images.
       // (createForward already carries every original attachment.)
@@ -527,15 +592,81 @@ export class MicrosoftEmailProvider implements EmailProvider {
       // quoted image broken. The caller's own attachments stay fail-hard.
       for (const att of carried) await this.addDraftAttachment(draftPath, att).catch(() => {});
       for (const att of attachments) await this.addDraftAttachment(draftPath, att);
-      await this.graph(`${draftPath}/send`, { method: "POST" });
+      return { ...draft, ...(patched ?? {}) };
     } catch (err) {
+      // Never sent (no /send on this path), so a plain DELETE is safe.
       await this.graph(draftPath, { method: "DELETE" }).catch(() => {});
       throw err;
     }
   }
 
+  // ── Drafts ──
+  // Built exactly as the matching send; nothing here calls /send or /sendMail.
+
+  async createDraft(params: DraftParams): Promise<DraftRef> {
+    // POST /messages creates the message in Drafts (isDraft: true) without sending.
+    const draft = await this.graph(gpath`/users/${params.mailbox}/messages`, { method: "POST", body: this.newMessage(params) });
+    return this.draftRef(params.mailbox, draft);
+  }
+
+  async createReplyDraft(params: ReplyParams): Promise<DraftRef> {
+    return this.draftRef(params.mailbox, await this.composeReplyDraft(params));
+  }
+
+  async createForwardDraft(params: ForwardParams): Promise<DraftRef> {
+    return this.draftRef(params.mailbox, await this.composeForwardDraft(params));
+  }
+
+  private async draftRef(mailbox: string, draft: any): Promise<DraftRef> {
+    if (typeof draft?.id !== "string" || !draft.id) throw new Error("Graph returned no id for the created draft");
+    let internetMessageId: string | undefined = draft?.internetMessageId ?? undefined;
+    if (!internetMessageId) {
+      // Not in the create response: read it back. Best-effort — the draft exists either way.
+      const r = await this.graph(gpath`/users/${mailbox}/messages/${draft.id}`, { params: { $select: "internetMessageId" } }).catch(() => null);
+      internetMessageId = r?.internetMessageId ?? undefined;
+    }
+    return { id: draft.id, draftId: draft.id, internetMessageId, conversationId: draft?.conversationId ?? undefined };
+  }
+
+  /**
+   * Checks `isDraft` before deleting, so a received or sent message's id is refused. The
+   * DELETE carries `If-Match` with the etag that check read: if the item changed in
+   * between — e.g. the person sent the draft, which with `immutableIds` keeps its id —
+   * Graph answers 412 instead of deleting the sent message. Graph's DELETE moves the draft
+   * to Deleted Items rather than purging it.
+   */
+  async deleteDraft(mailbox: string, draftId: string): Promise<void> {
+    if (!draftId.trim()) throw new Error("deleteDraft: draftId is empty");
+    const path = gpath`/users/${mailbox}/messages/${draftId}`;
+    const m = await this.graph(path, { params: { $select: "id,isDraft" } }).catch((err) => {
+      // Same wording as Gmail: without immutableIds a sent draft's id stops existing.
+      if (err instanceof GraphError && err.status === 404) {
+        throw new GraphError(404, err.code, `deleteDraft: no draft ${draftId} in ${mailbox} — already sent or discarded`, { cause: err });
+      }
+      // A malformed id (e.g. a Gmail draft id): same wording and status as Gmail's deleteDraft.
+      if (err instanceof GraphError && err.status === 400 && err.code === "ErrorInvalidIdMalformed") {
+        throw new GraphError(400, err.code, `deleteDraft: no draft ${draftId} in ${mailbox} — not a draft id (pass DraftRef.draftId)`, { cause: err });
+      }
+      throw err;
+    });
+    // status 404 ("no draft with this id"), the same shape Gmail's deleteDraft gives here.
+    if (m?.isDraft !== true) throw new GraphError(404, "NotADraft", `deleteDraft: message ${draftId} is not a draft`);
+    const etag: unknown = m["@odata.etag"];
+    if (typeof etag !== "string" || !etag) throw new Error(`deleteDraft: Graph returned no etag for ${draftId}`);
+    try {
+      await this.graph(path, { method: "DELETE", headers: { "If-Match": etag } });
+    } catch (err) {
+      // A changeKey mismatch: 412 per HTTP; Exchange may report it as 409 ErrorIrresolvableConflict.
+      const conflict = err instanceof GraphError && (err.status === 412 || (err.status === 409 && err.code === "ErrorIrresolvableConflict"));
+      if (conflict) {
+        throw new GraphError(err.status, err.code, `deleteDraft: conflict deleting ${draftId} (changed — sent or edited?); nothing was deleted: ${err.message}`, { cause: err });
+      }
+      throw err;
+    }
+  }
+
   async markAsRead(mailbox: string, messageId: string, isRead: boolean) {
-    await this.graph(`/users/${mailbox}/messages/${messageId}`, {
+    await this.graph(gpath`/users/${mailbox}/messages/${messageId}`, {
       method: "PATCH",
       body: { isRead },
     });
@@ -543,8 +674,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   async listFolders(mailbox: string, parentId?: string): Promise<Folder[]> {
     const path = parentId
-      ? `/users/${mailbox}/mailFolders/${parentId}/childFolders`
-      : `/users/${mailbox}/mailFolders`;
+      ? gpath`/users/${mailbox}/mailFolders/${parentId}/childFolders`
+      : gpath`/users/${mailbox}/mailFolders`;
 
     const r = await this.graph(path, {
       params: { $select: "id,displayName,totalItemCount,unreadItemCount,childFolderCount" },
@@ -564,7 +695,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
   }
 
   async sendConversationMessage(p: ConversationMessageParams): Promise<{ messageId: string }> {
-    const messageId = `<${randomUUID()}@${p.mailbox.split("@")[1] ?? "localhost"}>`;
+    const messageId = newMessageId(p.mailbox);
     const mime = buildMimeMessage({
       from: p.mailbox,
       to: p.to,
@@ -585,7 +716,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
     });
     // Graph's MIME send: the whole message, standard base64, as text/plain. Graph keeps
     // our Message-ID and threading headers, and saves the copy to Sent Items.
-    await this.graph(`/users/${p.mailbox}/sendMail`, {
+    await this.graph(gpath`/users/${p.mailbox}/sendMail`, {
       method: "POST",
       rawBody: Buffer.from(mime).toString("base64"),
       contentType: "text/plain",
@@ -595,8 +726,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   async findByInternetMessageId(mailbox: string, internetMessageId: string, folder?: string): Promise<MessageSummary[]> {
     const path = folder
-      ? `/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(folder)}/messages`
-      : `/users/${mailbox}/messages`;
+      ? gpath`/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(folder)}/messages`
+      : gpath`/users/${mailbox}/messages`;
     const r = await this.graph(path, {
       params: { $filter: `internetMessageId eq ${odataString(internetMessageId)}`, $select: SUMMARY_SELECT, $top: "10" },
     });
@@ -604,7 +735,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
   }
 
   async moveMessage(mailbox: string, messageId: string, destinationFolder: string): Promise<{ id: string }> {
-    const r = await this.graph(`/users/${mailbox}/messages/${messageId}/move`, {
+    const r = await this.graph(gpath`/users/${mailbox}/messages/${messageId}/move`, {
       method: "POST",
       body: { destinationId: MicrosoftEmailProvider.toFolderId(destinationFolder) },
     });
@@ -613,8 +744,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   async getOrCreateFolder(mailbox: string, name: string, opts: { parentId?: string; hidden?: boolean } = {}): Promise<Folder> {
     const base = opts.parentId
-      ? `/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(opts.parentId)}/childFolders`
-      : `/users/${mailbox}/mailFolders`;
+      ? gpath`/users/${mailbox}/mailFolders/${MicrosoftEmailProvider.toFolderId(opts.parentId)}/childFolders`
+      : gpath`/users/${mailbox}/mailFolders`;
     const find = async () => {
       const r = await this.graph(base, {
         params: {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Attachment } from "./types.js";
 import { headerValue } from "./headers.js";
 
@@ -17,6 +18,11 @@ function encodeWord(v: string): string {
 /** base64 wrapped at 76 chars per RFC 2045, safe for picky clients and long lines. */
 function base64Lines(buf: Buffer): string {
   return buf.toString("base64").replace(/(.{76})/g, "$1\r\n");
+}
+
+/** A fresh `Message-ID` (with angle brackets) on the mailbox's domain. */
+export function newMessageId(mailbox: string): string {
+  return `<${randomUUID()}@${mailbox.split("@")[1] ?? "localhost"}>`;
 }
 
 export interface MimeOptions {
