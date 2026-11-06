@@ -6,6 +6,19 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+### Added
+
+- **`sendDraft`: enviar sin cambios un borrador ya inspeccionado, en Gmail y Microsoft 365.**
+  Permite revisar los destinatarios reales que resolvió el proveedor y enviar exactamente ese
+  borrador, en vez de componer otro mensaje que perdería el hilo. Rechaza lo que no sea
+  borrador y, si el envío falla, nunca borra el borrador, porque el envío pudo haber salido;
+  una edición hecha entre la lectura y el envío sale igual. Cierra #13.
+
+### Changed
+
+- **BREAKING — `EmailProvider` agrega el método `sendDraft`.** Quien implemente la interfaz
+  (mocks en tests) tiene que agregarlo; a quien solo consume la librería no le cambia nada.
+
 ## [0.8.0] — 2026-11-05
 
 ### Added

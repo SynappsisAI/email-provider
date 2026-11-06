@@ -6,7 +6,7 @@ Provider-agnostic email library for Synappsis services. Wraps Google Workspace
 This is a **pure mechanics** library:
 
 - ✅ Send, list, read, search, reply, forward, get attachments, mark read, list folders
-- ✅ Drafts: create (new / reply / reply-all / forward) without sending, delete
+- ✅ Drafts: create (new / reply / reply-all / forward) without sending, delete, send
 - ✅ Per-mailbox impersonation via Google domain-wide delegation
 - ✅ Tenant-wide app permissions via Microsoft Graph
 - ✅ MIME construction with attachments
@@ -121,6 +121,7 @@ interface EmailProvider {
   createReplyDraft(params: ReplyParams): Promise<DraftRef>;
   createForwardDraft(params: ForwardParams): Promise<DraftRef>;
   deleteDraft(mailbox: string, draftId: string): Promise<void>;
+  sendDraft(mailbox: string, draftId: string): Promise<void>;
 }
 ```
 
@@ -286,12 +287,12 @@ await provider.deleteDraft(mailbox, ref.draftId);             // e.g. to replace
   `Reply-To` when set, else its `From`; reply-all adds the original's To/Cc minus the
   mailbox), threading, quoting and attachments. On Gmail a reply doesn't quote the
   original, the same as `replyToMessage`.
-- They **never send**, on any path. Nothing in them calls a send endpoint. On Microsoft
+- The `create*` methods **never send**, on any path. Nothing in them calls a send endpoint. On Microsoft
   a failure after the draft exists tries to delete it, so it isn't left half-built; if
   that delete also fails, the draft can remain.
 - No origin header is added unless you pass `origin`.
 - `DraftRef.id` is the draft's message id (for `readMessage`). `draftId` is what
-  `deleteDraft` takes: on Gmail the drafts-API id, which stays put when the draft is edited
+  `deleteDraft` and `sendDraft` take: on Gmail the drafts-API id, which stays put when the draft is edited
   (the message id doesn't); on Microsoft the message id again. Always pass `draftId`:
   `id` happens to work on Microsoft but is refused on Gmail. `internetMessageId` is the
   draft's `Message-ID` as created: on Gmail one we generate (always set), on Microsoft
@@ -321,6 +322,37 @@ await provider.deleteDraft(mailbox, ref.draftId);             // e.g. to replace
   so each added attachment must be < 3MB. (Without attachments or `origin`,
   `replyToMessage`/`forwardMessage` use Graph's one-shot `/reply`/`/forward`, where Graph
   places the comment above the quote itself; the result is equivalent, not byte-identical.)
+
+#### Sending a draft
+
+`sendDraft` sends an existing draft as it's stored, without composing anything new, so
+threading and the recipients the provider resolved stay as they are. It's what a reply needs
+when those recipients must be checked first:
+
+```ts
+const ref = await provider.createReplyDraft({ mailbox, messageId, body, replyAll: true });
+const draft = await provider.readMessage(mailbox, ref.id);   // recipients the provider resolved
+if (allowed(draft.to, draft.cc, draft.bcc)) await provider.sendDraft(mailbox, ref.draftId);
+else await provider.deleteDraft(mailbox, ref.draftId);
+```
+
+- It takes `DraftRef.draftId` on both providers, as `deleteDraft` does.
+- The draft keeps the `origin` it was created with and goes to Sent as a normal send.
+- It refuses anything that isn't a draft, with the same errors as `deleteDraft`. Microsoft
+  checks `isDraft` first (`POST /messages/{id}/send` then sends it). Gmail uses `drafts.send`,
+  which only knows draft ids.
+- **A failed send never deletes the draft.** The caller owns it, and a timeout or 5xx may
+  still have gone out, so check before retrying: Sent, and on Microsoft the Outbox too, since
+  Exchange submits asynchronously and a message on its way out may not be in Sent yet. Whether
+  such a message still reads as a draft wasn't tested, so a retry in that window could send it
+  twice. (`replyToMessage`/`forwardMessage` are different: they created their draft themselves
+  and delete it if `/send` fails.)
+- **What you read isn't locked.** An edit made between your read and the send goes out as
+  edited, including added recipients, so this narrows the gap but isn't a hard allowlist.
+  There's no atomic version check: Gmail's `drafts.send` takes none, and Graph ignored
+  `If-Match` on message `DELETE` (see above), so it isn't relied on here. On Microsoft the
+  `isDraft` check and the `/send` are also two requests. Keep the gap between read and send
+  short.
 
 ### Internal senders (Microsoft 365)
 
@@ -365,7 +397,7 @@ following OAuth scopes authorized in the Google Workspace admin console:
 - `https://www.googleapis.com/auth/gmail.modify`
 - `https://www.googleapis.com/auth/gmail.send`
 
-`gmail.modify` also covers the drafts API (`drafts.create` / `drafts.delete`), so drafts
+`gmail.modify` also covers the drafts API (`drafts.create` / `drafts.delete` / `drafts.send`), so drafts
 need no extra scope. (`gmail.compose` would cover it too, but isn't needed with `modify`.)
 
 Pass the parsed key JSON via `serviceAccountKey`.
@@ -377,6 +409,8 @@ permissions:
 
 - `Mail.Send`
 - `Mail.ReadWrite` (also what creating and deleting drafts needs)
+
+`sendDraft` needs both: it reads the message to check `isDraft`, then sends it.
 
 Grant admin consent, then pass `clientId`, `clientSecret`, and `tenantId`.
 

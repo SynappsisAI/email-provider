@@ -608,7 +608,7 @@ export class GoogleEmailProvider implements EmailProvider {
 
   // ── Drafts ──
   // Same MIME as the matching send, handed to drafts.create instead of messages.send.
-  // Nothing on these paths calls messages.send or drafts.send. Each draft gets our own
+  // Nothing on the create paths calls messages.send or drafts.send. Each draft gets our own
   // Message-ID so the caller always has one to find it by.
 
   async createDraft(params: DraftParams): Promise<DraftRef> {
@@ -648,30 +648,44 @@ export class GoogleEmailProvider implements EmailProvider {
     };
   }
 
-  /** drafts.delete only knows draft ids, so a received/sent message's id can't hit it:
-   *  Gmail answers 404 (or 400 `invalidArgument` for an id it can't parse) and nothing is
-   *  deleted. Any other 400 (e.g. an auth/delegation failure) propagates as is. Gmail
-   *  deletes a draft permanently. */
-  async deleteDraft(mailbox: string, draftId: string): Promise<void> {
-    if (!draftId.trim()) throw new Error("deleteDraft: draftId is empty");
+  /** Run a drafts API call. These only know draft ids, so a received or sent message's id
+   *  can't hit them: Gmail answers 404 (or 400 `invalidArgument` for an id it can't parse)
+   *  and nothing happens. Any other 400 (e.g. an auth/delegation failure) propagates as is. */
+  private async onDraft(
+    op: "deleteDraft" | "sendDraft",
+    mailbox: string,
+    draftId: string,
+    call: (drafts: gmail_v1.Gmail["users"]["drafts"]) => Promise<unknown>,
+  ): Promise<void> {
+    if (!draftId.trim()) throw new Error(`${op}: draftId is empty`);
     try {
-      await this.getGmail(mailbox).users.drafts.delete({ userId: "me", id: draftId });
+      await call(this.getGmail(mailbox).users.drafts);
     } catch (err: any) {
       const status = httpStatus(err);
       const list = err?.response?.data?.error?.errors ?? err?.errors;
       const reasons: unknown[] = Array.isArray(list) ? list.map((e: any) => e?.reason) : [];
-      // invalidArgument is Gmail's generic 400 reason; only its "Invalid id value" means the
-      // id isn't a draft id.
-      const badId = status === 400 && reasons.includes("invalidArgument") && /invalid\b.*\bid\b/i.test(String(err?.message ?? ""));
+      // invalidArgument is Gmail's generic 400 reason; only "Invalid id value" and the like
+      // mean the id isn't a draft id ("Invalid Message-ID header" is about the stored draft).
+      const badId = status === 400 && reasons.includes("invalidArgument") && /\binvalid\s+(?:\w+\s+)?id\b/i.test(String(err?.message ?? ""));
       if (status === 404 || badId) {
         // Keep the HTTP status on the error, as Microsoft's GraphError does.
         throw Object.assign(
-          new Error(`deleteDraft: no draft ${draftId} in ${mailbox} — already sent or discarded, or not a draft id (pass DraftRef.draftId)`, { cause: err }),
+          new Error(`${op}: no draft ${draftId} in ${mailbox} — already sent or discarded, or not a draft id (pass DraftRef.draftId)`, { cause: err }),
           { status },
         );
       }
       throw err;
     }
+  }
+
+  /** Gmail deletes a draft permanently. */
+  async deleteDraft(mailbox: string, draftId: string): Promise<void> {
+    await this.onDraft("deleteDraft", mailbox, draftId, (drafts) => drafts.delete({ userId: "me", id: draftId }));
+  }
+
+  /** The stored draft goes out as is: only its id is passed, so nothing is rebuilt. */
+  async sendDraft(mailbox: string, draftId: string): Promise<void> {
+    await this.onDraft("sendDraft", mailbox, draftId, (drafts) => drafts.send({ userId: "me", requestBody: { id: draftId } }));
   }
 
   async markAsRead(mailbox: string, messageId: string, isRead: boolean) {

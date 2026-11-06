@@ -451,3 +451,53 @@ test("a Reply-To with no usable address falls back to From", async () => {
   await p.createReplyDraft({ mailbox: "ana@example.com", messageId: "o", body: "x" });
   assert.equal(headerOf(draftMime(calls), "To"), "bob@example.com");
 });
+
+// ── sendDraft ──
+
+test("sendDraft: sends the stored draft by draft id, rebuilding nothing", async () => {
+  const { p, calls } = provider();
+  await p.sendDraft("ana@example.com", "r-1");
+  assert.deepEqual(calls.map((c) => [c.api, c.args]), [["drafts.send", { userId: "me", requestBody: { id: "r-1" } }]]);
+});
+
+test("sendDraft: an id that isn't a draft is refused with deleteDraft's error shape", async () => {
+  for (const err of [
+    { status: 404 },
+    { message: "Invalid id value", status: 400, response: { status: 400, data: { error: { errors: [{ reason: "invalidArgument" }] } } } },
+  ]) {
+    const { p, calls } = provider({
+      "drafts.send": () => {
+        throw Object.assign(new Error("nope"), err);
+      },
+    });
+    await assert.rejects(p.sendDraft("ana@example.com", "18c0ffee"), (e: any) => /^sendDraft: no draft 18c0ffee/.test(e.message) && e.status === err.status);
+    assert.deepEqual(calls.map((c) => c.api), ["drafts.send"]);
+  }
+});
+
+test("sendDraft: a failed send propagates and never deletes the draft", async () => {
+  const { p, calls } = provider({
+    "drafts.send": () => {
+      throw Object.assign(new Error("Backend Error"), { status: 500 });
+    },
+  });
+  await assert.rejects(p.sendDraft("ana@example.com", "r-1"), (e: any) => e.message === "Backend Error" && e.status === 500);
+  assert.ok(!calls.some((c) => c.api === "drafts.delete"));
+});
+
+test("sendDraft: a draft Gmail can't send isn't reported as 'no draft'", async () => {
+  for (const message of ["Invalid To header", "Invalid Message-ID header"]) {
+    const { p } = provider({
+      "drafts.send": () => {
+        throw Object.assign(new Error(message), { status: 400, errors: [{ reason: "invalidArgument" }] });
+      },
+    });
+    await assert.rejects(p.sendDraft("ana@example.com", "r-1"), (e: any) => e.message === message);
+  }
+});
+
+test("sendDraft: an empty id is refused before any request", async () => {
+  const { p, calls } = provider();
+  await assert.rejects(p.sendDraft("ana@example.com", " "), /sendDraft: draftId is empty/);
+  assert.equal(calls.length, 0);
+});

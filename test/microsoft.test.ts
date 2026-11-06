@@ -494,3 +494,66 @@ test("deleteDraft: a 404 about the mailbox is not reported as 'already sent or d
   on("GET", /./, { status: 404, json: { error: { code: "ErrorInvalidUser", message: "no such user" } } });
   await assert.rejects(provider().deleteDraft("typo@contoso.com", "D1"), /^Error: Graph API 404: no such user$/);
 });
+
+// ── sendDraft ──
+
+test("sendDraft: checks isDraft, then POSTs /send with no body, and touches nothing else", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  on("POST", /\/messages\/D1\/send$/, { status: 202 });
+  await provider().sendDraft("ana@contoso.com", "D1");
+  assert.deepEqual(calls.map((c) => [c.method, c.url.pathname]), [
+    ["GET", "/v1.0/users/ana@contoso.com/messages/D1"],
+    ["POST", "/v1.0/users/ana@contoso.com/messages/D1/send"],
+  ]);
+  assert.equal(calls[1].body, undefined);
+});
+
+test("sendDraft: refuses a message that isn't a draft, sending nothing", async () => {
+  on("GET", /\/messages\/M1$/, { json: { id: "M1", isDraft: false } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "M1"), (e: any) => /^sendDraft: message M1 is not a draft/.test(e.message) && e.status === 404);
+  assert.equal(calls.length, 1);
+});
+
+test("sendDraft: a failed send keeps the draft and the error's status (it may have gone out)", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  on("POST", /\/D1\/send$/, { status: 503, json: { error: { code: "ServiceUnavailable", message: "busy" } } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), (e: any) => e.status === 503);
+  assert.ok(!calls.some((c) => c.method === "DELETE"));
+});
+
+test("sendDraft: an id that doesn't exist or is malformed is refused at the check, sending nothing", async () => {
+  on("GET", /\/messages\/GONE$/, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
+  on("GET", /\/messages\/r-1$/, { status: 400, json: { error: { code: "ErrorInvalidIdMalformed", message: "Id is malformed." } } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "GONE"), /^Error: sendDraft: no draft GONE in ana@contoso\.com — already sent or discarded$/);
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "r-1"), (e: any) => /no draft r-1 .* not a draft id/.test(e.message) && e.status === 400);
+  assert.ok(!calls.some((c) => c.method === "POST"));
+});
+
+test("sendDraft: a 404 from /send stays Graph's error, not 'already sent' (the check just saw the draft)", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  on("POST", /\/D1\/send$/, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), /^Error: Graph API 404: not found$/);
+});
+
+test("sendDraft: sending again after success is refused under immutableIds (same id, no longer a draft)", async () => {
+  let sent = false;
+  responses.push((c) => (c.method === "GET" ? { json: { id: "D1", isDraft: !sent } } : undefined));
+  responses.push((c) => {
+    if (c.method !== "POST") return undefined;
+    sent = true;
+    return { status: 202 };
+  });
+  const p = provider({ immutableIds: true });
+  await p.sendDraft("ana@contoso.com", "D1");
+  await assert.rejects(p.sendDraft("ana@contoso.com", "D1"), /not a draft/);
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
+});
+
+test("sendDraft: an empty id is refused before any request; a crafted id stays in the mailbox", async () => {
+  await assert.rejects(provider().sendDraft("ana@contoso.com", " "), /sendDraft: draftId is empty/);
+  assert.equal(calls.length, 0);
+  on("GET", /./, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "../../other@contoso.com/messages/X"));
+  assert.ok(calls[0].url.pathname.startsWith("/v1.0/users/ana@contoso.com/messages/"));
+  assert.ok(!calls.some((c) => c.method === "POST"));
+});

@@ -430,7 +430,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
   async replyToMessage(params: ReplyParams) {
     const { mailbox, messageId, body, replyAll, attachments, origin } = params;
     if (attachments?.length || origin !== undefined) {
-      await this.sendDraft(mailbox, (await this.composeReplyDraft(params)).id);
+      await this.sendComposedDraft(mailbox, (await this.composeReplyDraft(params)).id);
       return;
     }
     const action = replyAll ? "replyAll" : "reply";
@@ -443,7 +443,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
   async forwardMessage(params: ForwardParams) {
     const { mailbox, messageId, to, comment, attachments, origin } = params;
     if (attachments?.length || origin !== undefined) {
-      await this.sendDraft(mailbox, (await this.composeForwardDraft(params)).id);
+      await this.sendComposedDraft(mailbox, (await this.composeForwardDraft(params)).id);
       return;
     }
     await this.graph(gpath`/users/${mailbox}/messages/${messageId}/forward`, {
@@ -518,7 +518,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
    * errors after Exchange already accepted it (timeout, 5xx), that DELETE can delete the
    * message on its way out.
    */
-  private async sendDraft(mailbox: string, draftId: string) {
+  private async sendComposedDraft(mailbox: string, draftId: string) {
     const draftPath = gpath`/users/${mailbox}/messages/${draftId}`;
     try {
       await this.graph(`${draftPath}/send`, { method: "POST" });
@@ -598,7 +598,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
   }
 
   // ── Drafts ──
-  // Built exactly as the matching send; nothing here calls /send or /sendMail.
+  // Built like the matching send. Nothing on the create paths calls /send or /sendMail;
+  // the public sendDraft is the one explicit way to send a draft.
 
   async createDraft(params: DraftParams): Promise<DraftRef> {
     // POST /messages creates the message in Drafts (isDraft: true) without sending.
@@ -626,29 +627,43 @@ export class MicrosoftEmailProvider implements EmailProvider {
   }
 
   /**
-   * Checks `isDraft` before deleting, so a received or sent message's id is refused. The
-   * check and the DELETE are two separate requests, so this isn't atomic: see "Known race"
-   * in the README.
+   * The draft's path after checking `isDraft`, so a received or sent message's id is refused,
+   * plus the error translation for whatever is then done to it. The check and that next
+   * request are separate, so they aren't atomic: see "Known race (Microsoft)" and "Sending a
+   * draft" in the README.
    */
-  async deleteDraft(mailbox: string, draftId: string): Promise<void> {
-    if (!draftId.trim()) throw new Error("deleteDraft: draftId is empty");
+  private async checkedDraft(op: "deleteDraft" | "sendDraft", mailbox: string, draftId: string) {
+    if (!draftId.trim()) throw new Error(`${op}: draftId is empty`);
     const path = gpath`/users/${mailbox}/messages/${draftId}`;
     const noDraft = (err: unknown): never => {
-      // The item itself is gone (e.g. sent, so its id changed), as Gmail's deleteDraft reports.
+      // The item itself is gone (e.g. sent, so its id changed), as Gmail reports it.
       // Other 404s (ErrorInvalidUser, MailboxNotEnabledForRESTAPI…) say nothing about the draft.
       if (err instanceof GraphError && err.status === 404 && err.code === "ErrorItemNotFound") {
-        throw new GraphError(404, err.code, `deleteDraft: no draft ${draftId} in ${mailbox} — already sent or discarded`, { cause: err });
+        throw new GraphError(404, err.code, `${op}: no draft ${draftId} in ${mailbox} — already sent or discarded`, { cause: err });
       }
-      // A malformed id (e.g. a Gmail draft id), as Gmail's deleteDraft reports.
+      // A malformed id (e.g. a Gmail draft id), as Gmail reports it.
       if (err instanceof GraphError && err.status === 400 && err.code === "ErrorInvalidIdMalformed") {
-        throw new GraphError(400, err.code, `deleteDraft: no draft ${draftId} in ${mailbox} — not a draft id (pass DraftRef.draftId)`, { cause: err });
+        throw new GraphError(400, err.code, `${op}: no draft ${draftId} in ${mailbox} — not a draft id (pass DraftRef.draftId)`, { cause: err });
       }
       throw err;
     };
     const m = await this.graph(path, { params: { $select: "id,isDraft" } }).catch(noDraft);
-    // status 404 ("no draft with this id"), the same shape Gmail's deleteDraft gives here.
-    if (m?.isDraft !== true) throw new GraphError(404, "NotADraft", `deleteDraft: message ${draftId} is not a draft`);
+    // status 404 ("no draft with this id"), the same shape Gmail gives here.
+    if (m?.isDraft !== true) throw new GraphError(404, "NotADraft", `${op}: message ${draftId} is not a draft`);
+    return { path, noDraft };
+  }
+
+  async deleteDraft(mailbox: string, draftId: string): Promise<void> {
+    const { path, noDraft } = await this.checkedDraft("deleteDraft", mailbox, draftId);
     await this.graph(path, { method: "DELETE" }).catch(noDraft);
+  }
+
+  /** Unlike `sendComposedDraft`, a failed send never deletes the draft: the caller owns it,
+   *  and the send may still have gone out. /send errors stay as Graph gave them: the check
+   *  just saw the draft, so a 404 here isn't "already sent or discarded". */
+  async sendDraft(mailbox: string, draftId: string): Promise<void> {
+    const { path } = await this.checkedDraft("sendDraft", mailbox, draftId);
+    await this.graph(`${path}/send`, { method: "POST" });
   }
 
   async markAsRead(mailbox: string, messageId: string, isRead: boolean) {

@@ -169,7 +169,7 @@ export interface DraftRef {
   /** Message id of the draft: `readMessage` / `getAttachment` take it. On Gmail it changes
    *  whenever the draft is edited (Gmail replaces the message); `draftId` doesn't. */
   id: string;
-  /** Pass to `deleteDraft`. Gmail: the draft id (drafts API, not a message id).
+  /** Pass to `deleteDraft` / `sendDraft`. Gmail: the draft id (drafts API, not a message id).
    *  Microsoft: the message id, same as `id`. */
   draftId: string;
   /** The draft's `Message-ID` as created, with angle brackets; undefined if the provider
@@ -332,9 +332,10 @@ export interface EmailProvider {
    *  applies only on creation (Microsoft `isHidden`; Gmail hides the label). */
   getOrCreateFolder(mailbox: string, name: string, opts?: { parentId?: string; hidden?: boolean }): Promise<Folder>;
 
-  // Drafts: built like the matching send (same recipients, threading, quoting,
-  // attachments), saved in the mailbox's Drafts and NEVER sent, on any path. No origin
-  // header unless the caller passes `origin`. On Microsoft a reply/forward draft is the
+  // Drafts: the create* methods build one like the matching send (same recipients,
+  // threading, quoting, attachments) and save it in the mailbox's Drafts, NEVER sending it,
+  // on any path. `sendDraft` is the one explicit way to send a draft. No origin header
+  // unless the caller passes `origin`. On Microsoft a reply/forward draft is the
   // createReply/createForward flow that replyToMessage/forwardMessage use with attachments
   // or `origin`; their one-shot /reply and /forward can't produce a draft.
 
@@ -346,7 +347,13 @@ export interface EmailProvider {
   createForwardDraft(params: ForwardParams): Promise<DraftRef>;
   /** Delete a draft by `DraftRef.draftId`. Throws, deleting nothing, when the target is
    *  not a draft at the moment of the check. On Microsoft the check and the delete aren't
-   *  atomic: a draft sent in between can be deleted (README, "Known race").
+   *  atomic: a draft sent in between can be deleted (README, "Known race (Microsoft)").
    *  Treat a deleted draft as not restorable. */
   deleteDraft(mailbox: string, draftId: string): Promise<void>;
+  /** Send an existing draft, unchanged, by `DraftRef.draftId`. Throws, sending nothing, when
+   *  the target is not a draft at the moment of the check. It keeps the `origin` it was
+   *  created with and goes to Sent as a normal send. A failed send never deletes the draft,
+   *  and may still have gone out. An edit made after you read the draft goes out too
+   *  (README, "Sending a draft"). */
+  sendDraft(mailbox: string, draftId: string): Promise<void>;
 }
