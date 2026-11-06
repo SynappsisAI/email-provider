@@ -6,16 +6,18 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-11-04
+## [0.8.0] — 2026-11-05
 
 ### Added
 
 - **Borradores sin enviar en Gmail y Microsoft 365: `createDraft`, `createReplyDraft`,
   `createForwardDraft` y `deleteDraft`.** Un asistente puede dejar en el buzón de una persona
   un mensaje, respuesta, respuesta a todos o reenvío, armado igual que el envío equivalente
-  pero sin enviarlo nunca, para que ella lo revise y lo envíe; `deleteDraft` solo borra
-  borradores (en Microsoft verifica `isDraft` y borra condicionado al etag). No requiere
-  permisos nuevos (`gmail.modify` / `Mail.ReadWrite`); cierra #10 y AgentFleet debe bumpear
+  pero sin enviarlo nunca, para que ella lo revise y lo envíe. `deleteDraft` rechaza lo que
+  no sea borrador, pero el borrado no se puede dar por recuperable y, en Microsoft, chequeo y
+  borrado no son atómicos: un borrador que la persona envía en ese instante puede borrarse
+  igual, sin la protección por etag que anunciaba una versión anterior de esta entrada (Graph
+  no la respetó al probarla en un tenant real). No requiere permisos nuevos (`gmail.modify` / `Mail.ReadWrite`); cierra #10 y AgentFleet debe bumpear
   el pin a `v0.8.0`.
 
 ### Changed

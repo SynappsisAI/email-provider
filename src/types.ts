@@ -345,7 +345,8 @@ export interface EmailProvider {
   /** A forward saved as a draft (as `forwardMessage` would build it). */
   createForwardDraft(params: ForwardParams): Promise<DraftRef>;
   /** Delete a draft by `DraftRef.draftId`. Throws, deleting nothing, when the target is
-   *  not a draft, so it can't remove a received or sent message. Gmail deletes it
-   *  permanently; Microsoft moves it to Deleted Items (recoverable). */
+   *  not a draft at the moment of the check. On Microsoft the check and the delete aren't
+   *  atomic: a draft sent in between can be deleted (README, "Known race").
+   *  Treat a deleted draft as not restorable. */
   deleteDraft(mailbox: string, draftId: string): Promise<void>;
 }

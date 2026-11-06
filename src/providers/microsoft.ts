@@ -152,8 +152,6 @@ export class MicrosoftEmailProvider implements EmailProvider {
       rawBody?: string;
       contentType?: string;
       params?: Record<string, string>;
-      /** Extra request headers, e.g. `If-Match`. */
-      headers?: Record<string, string>;
     } = {}
   ) {
     const token = await this.getToken();
@@ -167,7 +165,6 @@ export class MicrosoftEmailProvider implements EmailProvider {
       "Content-Type": opts.contentType ?? "application/json",
     };
     if (this.immutableIds) headers.Prefer = 'IdType="ImmutableId"';
-    Object.assign(headers, opts.headers);
 
     const res = await fetch(url.toString(), {
       method: opts.method ?? "GET",
@@ -518,7 +515,7 @@ export class MicrosoftEmailProvider implements EmailProvider {
    * builds the same draft `createReplyDraft`/`createForwardDraft` save (one mapping each,
    * below), then sends it. A failed send deletes the draft so no orphan is left behind
    * (the v0.7 behavior). Known hazard, tracked in #12: with `immutableIds`, if /send
-   * errors after Exchange already accepted it (timeout, 5xx), that DELETE can bin the
+   * errors after Exchange already accepted it (timeout, 5xx), that DELETE can delete the
    * message on its way out.
    */
   private async sendDraft(mailbox: string, draftId: string) {
@@ -630,39 +627,28 @@ export class MicrosoftEmailProvider implements EmailProvider {
 
   /**
    * Checks `isDraft` before deleting, so a received or sent message's id is refused. The
-   * DELETE carries `If-Match` with the etag that check read: if the item changed in
-   * between — e.g. the person sent the draft, which with `immutableIds` keeps its id —
-   * Graph answers 412 instead of deleting the sent message. Graph's DELETE moves the draft
-   * to Deleted Items rather than purging it.
+   * check and the DELETE are two separate requests, so this isn't atomic: see "Known race"
+   * in the README.
    */
   async deleteDraft(mailbox: string, draftId: string): Promise<void> {
     if (!draftId.trim()) throw new Error("deleteDraft: draftId is empty");
     const path = gpath`/users/${mailbox}/messages/${draftId}`;
-    const m = await this.graph(path, { params: { $select: "id,isDraft" } }).catch((err) => {
-      // Same wording as Gmail: without immutableIds a sent draft's id stops existing.
-      if (err instanceof GraphError && err.status === 404) {
+    const noDraft = (err: unknown): never => {
+      // The item itself is gone (e.g. sent, so its id changed), as Gmail's deleteDraft reports.
+      // Other 404s (ErrorInvalidUser, MailboxNotEnabledForRESTAPI…) say nothing about the draft.
+      if (err instanceof GraphError && err.status === 404 && err.code === "ErrorItemNotFound") {
         throw new GraphError(404, err.code, `deleteDraft: no draft ${draftId} in ${mailbox} — already sent or discarded`, { cause: err });
       }
-      // A malformed id (e.g. a Gmail draft id): same wording and status as Gmail's deleteDraft.
+      // A malformed id (e.g. a Gmail draft id), as Gmail's deleteDraft reports.
       if (err instanceof GraphError && err.status === 400 && err.code === "ErrorInvalidIdMalformed") {
         throw new GraphError(400, err.code, `deleteDraft: no draft ${draftId} in ${mailbox} — not a draft id (pass DraftRef.draftId)`, { cause: err });
       }
       throw err;
-    });
+    };
+    const m = await this.graph(path, { params: { $select: "id,isDraft" } }).catch(noDraft);
     // status 404 ("no draft with this id"), the same shape Gmail's deleteDraft gives here.
     if (m?.isDraft !== true) throw new GraphError(404, "NotADraft", `deleteDraft: message ${draftId} is not a draft`);
-    const etag: unknown = m["@odata.etag"];
-    if (typeof etag !== "string" || !etag) throw new Error(`deleteDraft: Graph returned no etag for ${draftId}`);
-    try {
-      await this.graph(path, { method: "DELETE", headers: { "If-Match": etag } });
-    } catch (err) {
-      // A changeKey mismatch: 412 per HTTP; Exchange may report it as 409 ErrorIrresolvableConflict.
-      const conflict = err instanceof GraphError && (err.status === 412 || (err.status === 409 && err.code === "ErrorIrresolvableConflict"));
-      if (conflict) {
-        throw new GraphError(err.status, err.code, `deleteDraft: conflict deleting ${draftId} (changed — sent or edited?); nothing was deleted: ${err.message}`, { cause: err });
-      }
-      throw err;
-    }
+    await this.graph(path, { method: "DELETE" }).catch(noDraft);
   }
 
   async markAsRead(mailbox: string, messageId: string, isRead: boolean) {

@@ -298,11 +298,23 @@ await provider.deleteDraft(mailbox, ref.draftId);             // e.g. to replace
   Graph's (undefined if Graph didn't report one). It isn't guaranteed to survive the owner
   editing or sending the draft (Gmail replaces a draft's message on every edit), so don't
   rely on it alone to tell whether a draft was sent.
-- `deleteDraft` only deletes drafts. Microsoft checks `isDraft` first and throws on
-  anything else, then deletes with `If-Match` on the etag it just read, so a draft sent
-  in between (same id under `immutableIds`) gets a 412 and is not deleted. Gmail goes
-  through `drafts.delete`, which only knows draft ids, so a message id is refused. Gmail deletes the draft permanently. Microsoft's
-  `DELETE` moves it to Deleted Items.
+- `deleteDraft` refuses anything that isn't a draft when it checks. Microsoft checks
+  `isDraft` first and throws on anything else. Gmail goes through `drafts.delete`, which only
+  knows draft ids, so a message id is refused.
+- Treat a deleted draft as not restorable. Gmail deletes it permanently. On Microsoft, a live
+  run on 2026-11-05 ([#10](https://github.com/SynappsisAI/email-provider/issues/10)) found the
+  deleted draft in neither Drafts nor Deleted Items, while `GET` by its immutable id still
+  answered 200. So with `immutableIds`, `readMessage` can't confirm a draft is gone, and a
+  second `deleteDraft` on the same id is untested.
+- **Known race (Microsoft).** The `isDraft` check and the `DELETE` are
+  two requests. In that same run, with `immutableIds`, a `DELETE` with a stale `If-Match` still
+  deleted the message, so don't rely on `If-Match` to tie them together. With `immutableIds`, a
+  draft the person sends in that instant keeps its id, and the sent message is deleted. A draft
+  edited in that instant is deleted too, and whether a send still queued reads as a draft
+  wasn't tested. Without it the id should change when
+  the message moves to Sent Items, so a late `DELETE` would get a 404 and `deleteDraft` would
+  report "no draft". That wasn't tested live, and Exchange submits asynchronously, so don't
+  treat it as race-free.
 - Microsoft: a new-message draft is `POST /messages` (attachments ride in the same request,
   as in `sendEmail`). Reply/forward drafts are `createReply`/`createReplyAll`/
   `createForward` + body patch + attachments, the flow described above minus the `/send`,

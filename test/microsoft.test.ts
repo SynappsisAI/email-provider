@@ -349,29 +349,12 @@ test("createForwardDraft: a failure after creation deletes the draft and never s
   assert.ok(calls.some((c) => c.method === "DELETE" && c.url.pathname.endsWith("/messages/D4")));
 });
 
-test("deleteDraft: deletes a draft, conditioned on the etag the isDraft check read", async () => {
-  on("GET", /\/messages\/D1$/, { json: { "@odata.etag": 'W/"CQAAABYAAAA1"', id: "D1", isDraft: true } });
+test("deleteDraft: deletes a draft after the isDraft check", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
   on("DELETE", /\/messages\/D1$/, { status: 204 });
   await provider().deleteDraft("ana@contoso.com", "D1");
   assert.equal(calls[0].url.searchParams.get("$select"), "id,isDraft");
   assert.deepEqual(calls.map((c) => c.method), ["GET", "DELETE"]);
-  assert.equal(calls[1].headers["If-Match"], 'W/"CQAAABYAAAA1"');
-});
-
-test("deleteDraft: a draft changed (e.g. sent) after the check → 412 surfaces as not deleted", async () => {
-  on("GET", /\/messages\/D1$/, { json: { "@odata.etag": 'W/"v1"', id: "D1", isDraft: true } });
-  on("DELETE", /\/messages\/D1$/, { status: 412, json: { error: { code: "ErrorIrresolvableConflict", message: "changed" } } });
-  await assert.rejects(provider().deleteDraft("ana@contoso.com", "D1"), (err: any) => {
-    assert.match(err.message, /conflict deleting D1 .*nothing was deleted/);
-    assert.equal(err.status, 412);
-    return true;
-  });
-});
-
-test("deleteDraft: without an etag to condition on, deletes nothing", async () => {
-  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
-  await assert.rejects(provider().deleteDraft("ana@contoso.com", "D1"), /no etag/);
-  assert.ok(!calls.some((c) => c.method === "DELETE"));
 });
 
 test("deleteDraft: refuses a message that isn't a draft (status 404, like Gmail), deleting nothing", async () => {
@@ -398,12 +381,6 @@ const draftFlow = (id: string) => {
   on("GET", /\/attachments$/, { json: { value: [] } });
 };
 
-test("deleteDraft: a 409 change-key conflict also surfaces as not deleted", async () => {
-  on("GET", /\/messages\/D1$/, { json: { "@odata.etag": 'W/"v1"', id: "D1", isDraft: true } });
-  on("DELETE", /\/messages\/D1$/, { status: 409, json: { error: { code: "ErrorIrresolvableConflict", message: "changeKey" } } });
-  await assert.rejects(provider().deleteDraft("ana@contoso.com", "D1"), /conflict deleting D1 .*nothing was deleted/);
-});
-
 test("createReplyDraft: internetMessageId taken from the PATCH response, no extra GET", async () => {
   on("POST", /\/createReply$/, { json: { id: "D6", body: { contentType: "html", content: "<p>q</p>" } } });
   on("PATCH", /\/messages\/D6$/, { json: { id: "D6", internetMessageId: "<d6@contoso.com>" } });
@@ -420,12 +397,6 @@ test("deleteDraft: a draft that no longer exists gets the same wording as Gmail,
     assert.equal(err.status, 404);
     return true;
   });
-});
-
-test("deleteDraft: a 409 that isn't a changeKey conflict propagates as is", async () => {
-  on("GET", /\/messages\/D1$/, { json: { "@odata.etag": 'W/"v1"', id: "D1", isDraft: true } });
-  on("DELETE", /\/messages\/D1$/, { status: 409, json: { error: { code: "ErrorQuotaExceeded", message: "other" } } });
-  await assert.rejects(provider().deleteDraft("ana@contoso.com", "D1"), /^Error: Graph API 409: other$/);
 });
 
 test("a token failure on an ordinary call still surfaces MSAL's own error", async () => {
@@ -505,4 +476,21 @@ test("deleteDraft: a malformed id gets the cross-provider 'no draft' wording, st
 test("createReplyDraft: a create response without an id says so (not 'invalid id' blaming the caller)", async () => {
   on("POST", /\/createReply$/, { json: {} });
   await assert.rejects(provider().createReplyDraft({ mailbox: "ana@contoso.com", messageId: "orig1", body: "x" }), /Graph returned no id for the createReply draft/);
+});
+
+test("deleteDraft: a DELETE that fails after the check is reported, never swallowed", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  on("DELETE", /\/messages\/D1$/, { status: 503, json: { error: { code: "ServiceUnavailable", message: "busy" } } });
+  await assert.rejects(provider().deleteDraft("ana@contoso.com", "D1"), (e: any) => e.status === 503);
+});
+
+test("deleteDraft: an item-not-found 404 on the DELETE reports 'no draft'", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  on("DELETE", /\/messages\/D1$/, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
+  await assert.rejects(provider().deleteDraft("ana@contoso.com", "D1"), (e: any) => /no draft D1 .* already sent or discarded/.test(e.message) && e.status === 404);
+});
+
+test("deleteDraft: a 404 about the mailbox is not reported as 'already sent or discarded'", async () => {
+  on("GET", /./, { status: 404, json: { error: { code: "ErrorInvalidUser", message: "no such user" } } });
+  await assert.rejects(provider().deleteDraft("typo@contoso.com", "D1"), /^Error: Graph API 404: no such user$/);
 });
