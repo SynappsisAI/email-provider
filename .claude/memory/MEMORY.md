@@ -1,0 +1,1 @@
+- [Green review before commit](green-review-before-commit.md) — clean adversarial review before commit; iterate rounds, but stop and give options when findings oscillate/contradict
