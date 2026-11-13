@@ -11,8 +11,10 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 - **`sendDraft`: enviar sin cambios un borrador ya inspeccionado, en Gmail y Microsoft 365.**
   Permite revisar los destinatarios reales que resolvió el proveedor y enviar exactamente ese
   borrador, en vez de componer otro mensaje que perdería el hilo. Rechaza lo que no sea
-  borrador y, si el envío falla, nunca borra el borrador, porque el envío pudo haber salido;
-  una edición hecha entre la lectura y el envío sale igual. Cierra #13.
+  borrador y, en Microsoft, también lo que ya no esté en Borradores: una prueba en vivo mostró
+  que con `immutableIds` un borrador descartado a Eliminados seguía enviándose. Si el envío
+  falla, nunca borra el borrador (pudo haber salido), y una edición hecha entre la lectura y
+  el envío sale igual; cierra #13.
 
 ### Changed
 

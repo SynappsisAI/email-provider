@@ -351,7 +351,8 @@ export interface EmailProvider {
    *  Treat a deleted draft as not restorable. */
   deleteDraft(mailbox: string, draftId: string): Promise<void>;
   /** Send an existing draft, unchanged, by `DraftRef.draftId`. Throws, sending nothing, when
-   *  the target is not a draft at the moment of the check. It keeps the `origin` it was
+   *  the target is not a draft at the moment of the check, or (Microsoft) is no longer in the
+   *  Drafts folder, e.g. discarded to Deleted Items. It keeps the `origin` it was
    *  created with and goes to Sent as a normal send. A failed send never deletes the draft,
    *  and may still have gone out. An edit made after you read the draft goes out too
    *  (README, "Sending a draft"). */

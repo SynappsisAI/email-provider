@@ -353,7 +353,7 @@ test("deleteDraft: deletes a draft after the isDraft check", async () => {
   on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
   on("DELETE", /\/messages\/D1$/, { status: 204 });
   await provider().deleteDraft("ana@contoso.com", "D1");
-  assert.equal(calls[0].url.searchParams.get("$select"), "id,isDraft");
+  assert.equal(calls[0].url.searchParams.get("$select"), "id,isDraft,parentFolderId");
   assert.deepEqual(calls.map((c) => c.method), ["GET", "DELETE"]);
 });
 
@@ -497,31 +497,87 @@ test("deleteDraft: a 404 about the mailbox is not reported as 'already sent or d
 
 // ── sendDraft ──
 
-test("sendDraft: checks isDraft, then POSTs /send with no body, and touches nothing else", async () => {
-  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+const DRAFTS = "DRAFTS-FOLDER";
+/** The mailbox's Drafts folder, as `sendDraft`'s folder check reads it. */
+const draftsFolder = () => on("GET", /\/mailFolders\/drafts$/, { json: { id: DRAFTS } });
+const inDrafts = (id: string) => ({ id, isDraft: true, parentFolderId: DRAFTS });
+
+test("sendDraft: checks isDraft, then the Drafts folder, then POSTs /send with no body", async () => {
+  draftsFolder();
+  on("GET", /\/messages\/D1$/, { json: inDrafts("D1") });
   on("POST", /\/messages\/D1\/send$/, { status: 202 });
   await provider().sendDraft("ana@contoso.com", "D1");
   assert.deepEqual(calls.map((c) => [c.method, c.url.pathname]), [
     ["GET", "/v1.0/users/ana@contoso.com/messages/D1"],
+    ["GET", "/v1.0/users/ana@contoso.com/mailFolders/drafts"],
     ["POST", "/v1.0/users/ana@contoso.com/messages/D1/send"],
   ]);
-  assert.equal(calls[1].body, undefined);
+  assert.equal(calls[2].body, undefined);
+  assert.equal(calls[0].url.searchParams.get("$select"), "id,isDraft,parentFolderId");
+});
+
+test("sendDraft: the Drafts folder id is read once per mailbox", async () => {
+  draftsFolder();
+  on("GET", /\/messages\/D\d$/, { json: inDrafts("D") });
+  on("POST", /\/send$/, { status: 202 });
+  const p = provider();
+  await p.sendDraft("ana@contoso.com", "D1");
+  await p.sendDraft("ana@contoso.com", "D2");
+  await p.sendDraft("bob@contoso.com", "D3");
+  assert.deepEqual(
+    calls.filter((c) => c.url.pathname.endsWith("/mailFolders/drafts")).map((c) => c.url.pathname),
+    ["/v1.0/users/ana@contoso.com/mailFolders/drafts", "/v1.0/users/bob@contoso.com/mailFolders/drafts"],
+  );
+});
+
+test("sendDraft: a missing draft is reported as such even when the folder lookup would fail", async () => {
+  on("GET", /\/mailFolders\/drafts$/, { status: 503, json: { error: { code: "ServiceUnavailable", message: "busy" } } });
+  on("GET", /\/messages\/GONE$/, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "GONE"), /no draft GONE .* already sent or discarded/);
+  assert.ok(!calls.some((c) => c.url.pathname.endsWith("/mailFolders/drafts")), "the draft is checked first");
+});
+
+test("sendDraft: a draft discarded to Deleted Items (still isDraft, same id under immutableIds) is refused, sending nothing", async () => {
+  draftsFolder();
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true, parentFolderId: "DELETED-ITEMS" } });
+  await assert.rejects(
+    provider({ immutableIds: true }).sendDraft("ana@contoso.com", "D1"),
+    (e: any) => /^sendDraft: message D1 is not in Drafts/.test(e.message) && e.status === 404,
+  );
+  assert.ok(!calls.some((c) => c.method === "POST"));
+});
+
+test("sendDraft: no parentFolderId reported means not provably in Drafts, so it's refused", async () => {
+  draftsFolder();
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), /not in Drafts/);
+  assert.ok(!calls.some((c) => c.method === "POST"));
+});
+
+test("sendDraft: a failed Drafts-folder lookup sends nothing", async () => {
+  on("GET", /\/mailFolders\/drafts$/, { status: 503, json: { error: { code: "ServiceUnavailable", message: "busy" } } });
+  on("GET", /\/messages\/D1$/, { json: inDrafts("D1") });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), (e: any) => e.status === 503);
+  assert.ok(!calls.some((c) => c.method === "POST"));
 });
 
 test("sendDraft: refuses a message that isn't a draft, sending nothing", async () => {
-  on("GET", /\/messages\/M1$/, { json: { id: "M1", isDraft: false } });
+  draftsFolder();
+  on("GET", /\/messages\/M1$/, { json: { id: "M1", isDraft: false, parentFolderId: "INBOX" } });
   await assert.rejects(provider().sendDraft("ana@contoso.com", "M1"), (e: any) => /^sendDraft: message M1 is not a draft/.test(e.message) && e.status === 404);
-  assert.equal(calls.length, 1);
+  assert.ok(!calls.some((c) => c.method === "POST"));
 });
 
 test("sendDraft: a failed send keeps the draft and the error's status (it may have gone out)", async () => {
-  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  draftsFolder();
+  on("GET", /\/messages\/D1$/, { json: inDrafts("D1") });
   on("POST", /\/D1\/send$/, { status: 503, json: { error: { code: "ServiceUnavailable", message: "busy" } } });
   await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), (e: any) => e.status === 503);
   assert.ok(!calls.some((c) => c.method === "DELETE"));
 });
 
 test("sendDraft: an id that doesn't exist or is malformed is refused at the check, sending nothing", async () => {
+  draftsFolder();
   on("GET", /\/messages\/GONE$/, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
   on("GET", /\/messages\/r-1$/, { status: 400, json: { error: { code: "ErrorInvalidIdMalformed", message: "Id is malformed." } } });
   await assert.rejects(provider().sendDraft("ana@contoso.com", "GONE"), /^Error: sendDraft: no draft GONE in ana@contoso\.com — already sent or discarded$/);
@@ -530,14 +586,20 @@ test("sendDraft: an id that doesn't exist or is malformed is refused at the chec
 });
 
 test("sendDraft: a 404 from /send stays Graph's error, not 'already sent' (the check just saw the draft)", async () => {
-  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true } });
+  draftsFolder();
+  on("GET", /\/messages\/D1$/, { json: inDrafts("D1") });
   on("POST", /\/D1\/send$/, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
   await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), /^Error: Graph API 404: not found$/);
 });
 
 test("sendDraft: sending again after success is refused under immutableIds (same id, no longer a draft)", async () => {
   let sent = false;
-  responses.push((c) => (c.method === "GET" ? { json: { id: "D1", isDraft: !sent } } : undefined));
+  draftsFolder();
+  responses.push((c) =>
+    c.method === "GET" && c.url.pathname.endsWith("/messages/D1")
+      ? { json: { id: "D1", isDraft: !sent, parentFolderId: sent ? "SENT-ITEMS" : DRAFTS } }
+      : undefined,
+  );
   responses.push((c) => {
     if (c.method !== "POST") return undefined;
     sent = true;
@@ -552,8 +614,41 @@ test("sendDraft: sending again after success is refused under immutableIds (same
 test("sendDraft: an empty id is refused before any request; a crafted id stays in the mailbox", async () => {
   await assert.rejects(provider().sendDraft("ana@contoso.com", " "), /sendDraft: draftId is empty/);
   assert.equal(calls.length, 0);
+  draftsFolder();
   on("GET", /./, { status: 404, json: { error: { code: "ErrorItemNotFound", message: "not found" } } });
   await assert.rejects(provider().sendDraft("ana@contoso.com", "../../other@contoso.com/messages/X"));
-  assert.ok(calls[0].url.pathname.startsWith("/v1.0/users/ana@contoso.com/messages/"));
+  assert.ok(calls.every((c) => c.url.pathname.startsWith("/v1.0/users/ana@contoso.com/")));
   assert.ok(!calls.some((c) => c.method === "POST"));
+});
+
+test("deleteDraft doesn't require the Drafts folder (deleting a discarded draft is harmless)", async () => {
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true, parentFolderId: "DELETED-ITEMS" } });
+  on("DELETE", /\/messages\/D1$/, { status: 204 });
+  await provider().deleteDraft("ana@contoso.com", "D1");
+  assert.ok(!calls.some((c) => c.url.pathname.endsWith("/mailFolders/drafts")));
+  assert.ok(calls.some((c) => c.method === "DELETE"));
+});
+
+test("sendDraft: a cached Drafts id that no longer matches is re-read once before refusing", async () => {
+  let draftsId = "OLD-DRAFTS";
+  responses.push((c) => (c.method === "GET" && c.url.pathname.endsWith("/mailFolders/drafts") ? { json: { id: draftsId } } : undefined));
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true, parentFolderId: "OLD-DRAFTS" } });
+  on("GET", /\/messages\/D2$/, { json: { id: "D2", isDraft: true, parentFolderId: "NEW-DRAFTS" } });
+  on("POST", /\/send$/, { status: 202 });
+  const p = provider();
+  await p.sendDraft("ana@contoso.com", "D1"); // caches OLD-DRAFTS
+  draftsId = "NEW-DRAFTS"; // the mailbox's folders changed
+  await p.sendDraft("ana@contoso.com", "D2");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 2);
+  assert.equal(calls.filter((c) => c.url.pathname.endsWith("/mailFolders/drafts")).length, 2);
+});
+
+test("sendDraft: NotInDrafts never claims 'not sent' (a submitted message in Outbox fails it too)", async () => {
+  draftsFolder();
+  on("GET", /\/messages\/D1$/, { json: { id: "D1", isDraft: true, parentFolderId: "OUTBOX" } });
+  await assert.rejects(provider().sendDraft("ana@contoso.com", "D1"), (e: any) => {
+    assert.match(e.message, /discarded, moved or already submitted/);
+    assert.doesNotMatch(e.message, /not sent/);
+    return true;
+  });
 });

@@ -120,6 +120,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
   private msalClient: ConfidentialClientApplication;
   private immutableIds: boolean;
   private originHeader?: string;
+  /** Drafts folder id per mailbox (it never changes); see `assertInDrafts`. */
+  private draftsFolderIds = new Map<string, string>();
 
   constructor(config: MicrosoftProviderConfig) {
     this.immutableIds = config.immutableIds ?? false;
@@ -647,10 +649,34 @@ export class MicrosoftEmailProvider implements EmailProvider {
       }
       throw err;
     };
-    const m = await this.graph(path, { params: { $select: "id,isDraft" } }).catch(noDraft);
+    const m = await this.graph(path, { params: { $select: "id,isDraft,parentFolderId" } }).catch(noDraft);
     // status 404 ("no draft with this id"), the same shape Gmail gives here.
     if (m?.isDraft !== true) throw new GraphError(404, "NotADraft", `${op}: message ${draftId} is not a draft`);
-    return { path, noDraft };
+    return { path, noDraft, parentFolderId: m.parentFolderId as string | undefined };
+  }
+
+  /**
+   * A draft the person discarded still reads `isDraft: true` from Deleted Items, and with
+   * immutableIds it keeps its id (live check, #13), so `isDraft` alone would let it be sent.
+   * Only a draft still in the Drafts folder passes. Fails safe: without a `parentFolderId`
+   * to compare, or if the two ids came back in different formats, it refuses. A cached
+   * Drafts id is re-read once before refusing, in case the mailbox's folders changed.
+   */
+  private async assertInDrafts(op: "sendDraft", mailbox: string, draftId: string, parentFolderId: string | undefined) {
+    const draftsFolderId = async (fresh: boolean) => {
+      const cached = this.draftsFolderIds.get(mailbox);
+      if (cached && !fresh) return { id: cached, wasCached: true };
+      const f = await this.graph(gpath`/users/${mailbox}/mailFolders/drafts`, { params: { $select: "id" } });
+      if (typeof f?.id !== "string" || !f.id) throw new Error(`${op}: Graph returned no id for the Drafts folder`);
+      this.draftsFolderIds.set(mailbox, f.id);
+      return { id: f.id as string, wasCached: false };
+    };
+    let drafts = await draftsFolderId(false);
+    if (parentFolderId !== drafts.id && drafts.wasCached) drafts = await draftsFolderId(true);
+    if (!parentFolderId || parentFolderId !== drafts.id) {
+      // Not "not sent": a draft already submitted (Outbox, Sent) fails this check too.
+      throw new GraphError(404, "NotInDrafts", `${op}: message ${draftId} is not in Drafts — discarded, moved or already submitted; nothing sent now`);
+    }
   }
 
   async deleteDraft(mailbox: string, draftId: string): Promise<void> {
@@ -662,7 +688,8 @@ export class MicrosoftEmailProvider implements EmailProvider {
    *  and the send may still have gone out. /send errors stay as Graph gave them: the check
    *  just saw the draft, so a 404 here isn't "already sent or discarded". */
   async sendDraft(mailbox: string, draftId: string): Promise<void> {
-    const { path } = await this.checkedDraft("sendDraft", mailbox, draftId);
+    const { path, parentFolderId } = await this.checkedDraft("sendDraft", mailbox, draftId);
+    await this.assertInDrafts("sendDraft", mailbox, draftId, parentFolderId);
     await this.graph(`${path}/send`, { method: "POST" });
   }
 

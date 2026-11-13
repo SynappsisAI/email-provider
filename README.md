@@ -341,14 +341,24 @@ else await provider.deleteDraft(mailbox, ref.draftId);
 - It refuses anything that isn't a draft, with the same errors as `deleteDraft`. Microsoft
   checks `isDraft` first (`POST /messages/{id}/send` then sends it). Gmail uses `drafts.send`,
   which only knows draft ids.
+- **On Microsoft it only sends a draft that is still in Drafts.** A draft the person discarded
+  to Deleted Items still reads `isDraft: true`, and with `immutableIds` it keeps its id: a live
+  check ([#13](https://github.com/SynappsisAI/email-provider/issues/13)) showed `sendDraft`
+  would have sent it. So it also compares `parentFolderId` with the Drafts folder and refuses
+  a draft anywhere else, including one the person moved to another folder on purpose.
 - **A failed send never deletes the draft.** The caller owns it, and a timeout or 5xx may
   still have gone out, so check before retrying: Sent, and on Microsoft the Outbox too, since
-  Exchange submits asynchronously and a message on its way out may not be in Sent yet. Whether
-  such a message still reads as a draft wasn't tested, so a retry in that window could send it
-  twice. (`replyToMessage`/`forwardMessage` are different: they created their draft themselves
-  and delete it if `/send` fails.)
+  Exchange submits asynchronously and a message on its way out may not be in Sent yet. In the
+  live check (one run, before the folder check existed), an immediate retry of a send that went
+  through still read as a draft, and Graph itself refused it (`403 Cannot submit message`).
+  Now, once the message has moved to Outbox or Sent, the folder check refuses a retry first
+  (`NotInDrafts`). **Neither error means "not sent"**: never treat one as safe to resend.
+  (`replyToMessage`/`forwardMessage` are different: they created their draft themselves and
+  delete it if `/send` fails.)
 - **What you read isn't locked.** An edit made between your read and the send goes out as
   edited, including added recipients, so this narrows the gap but isn't a hard allowlist.
+  Likewise, a draft discarded in the instant between the folder check and the send (with
+  `immutableIds`, where it keeps its id) still goes out.
   There's no atomic version check: Gmail's `drafts.send` takes none, and Graph ignored
   `If-Match` on message `DELETE` (see above), so it isn't relied on here. On Microsoft the
   `isDraft` check and the `/send` are also two requests. Keep the gap between read and send
@@ -410,7 +420,8 @@ permissions:
 - `Mail.Send`
 - `Mail.ReadWrite` (also what creating and deleting drafts needs)
 
-`sendDraft` needs both: it reads the message to check `isDraft`, then sends it.
+`sendDraft` needs both: it reads the message (`isDraft`, `parentFolderId`) and the Drafts
+folder's id, then sends it. If either read fails, nothing is sent.
 
 Grant admin consent, then pass `clientId`, `clientSecret`, and `tenantId`.
 
