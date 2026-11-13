@@ -6,6 +6,8 @@ publican como tags de git (`vX.Y.Z`). Entradas en español.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-13
+
 ### Added
 
 - **`sendDraft`: enviar sin cambios un borrador ya inspeccionado, en Gmail y Microsoft 365.**
